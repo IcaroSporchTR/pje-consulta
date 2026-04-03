@@ -141,7 +141,7 @@ class PjeClient:
             _log(f"  ✗ Erro ao enviar OTP: {e}")
         return False
 
-    def _autenticar_keycloak(self, usuario: str, senha: str, redirect_url: str) -> bool:
+    def _autenticar_keycloak(self, usuario: str, senha: str, redirect_url: str, otp: str = "") -> bool:
         """
         Autentica via Keycloak SSO (sso.cloud.pje.jus.br).
         Extrai realm e client_id da URL de redirect capturada no login.
@@ -225,12 +225,15 @@ class PjeClient:
                 otp_action = re.search(r'action="([^"]+)"', post_r.text)
                 if ("otp" in body_lower or "totp" in body_lower or "verification" in body_lower
                         or "segundo fator" in body_lower or "authenticator" in body_lower):
-                    _log("  ⚠ SEGUNDO FATOR (OTP) EXIGIDO — aguardando codigo")
-                    # Salva action para etapa 2
+                    _log("  ⚠ SEGUNDO FATOR (OTP) EXIGIDO")
                     if otp_action:
                         self._keycloak_otp_action = otp_action.group(1).replace("&amp;", "&")
-                        _log(f"  OTP action salva: {self._keycloak_otp_action[:80]}")
-                    return "otp_required"  # sinal especial para o frontend
+                    if otp and otp_action:
+                        # OTP ja fornecido — submete direto sem aguardar o frontend
+                        _log(f"  → Submetendo OTP fornecido diretamente")
+                        return self._autenticar_keycloak_com_otp(otp)
+                    _log(f"  OTP action salva: {self._keycloak_otp_action[:80] if otp_action else 'nao encontrada'}")
+                    return "otp_required"  # sinal para o frontend pedir o codigo
                 elif "pje.tjmg" in post_r.url or (redirect_uri and redirect_uri.split("/")[2] in post_r.url):
                     _log("  ✓ Redirecionado de volta ao PJe — autenticacao bem sucedida")
                     return True
@@ -241,7 +244,7 @@ class PjeClient:
 
         return False
 
-    def autenticar_com_senha(self, usuario: str, senha: str) -> bool:
+    def autenticar_com_senha(self, usuario: str, senha: str, otp: str = "") -> bool:
         """
         Autentica via usuario e senha.
         Tenta REST JSON primeiro, depois form POST (Seam/JSF).
@@ -302,7 +305,7 @@ class PjeClient:
                 # Detecta redirecionamento para Keycloak SSO
                 if "sso.cloud.pje.jus.br" in get_r.url:
                     _log(f"  → Detectado Keycloak SSO — usando fluxo OAuth")
-                    resultado_kc = self._autenticar_keycloak(usuario, senha, get_r.url)
+                    resultado_kc = self._autenticar_keycloak(usuario, senha, get_r.url, otp=otp)
                     if resultado_kc is True:
                         return True
                     if resultado_kc == "otp_required":

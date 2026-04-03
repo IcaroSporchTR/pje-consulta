@@ -107,9 +107,10 @@ auth_modo = st.sidebar.radio(
     index=0,
 )
 
-cert_obj = None
+cert_obj    = None
 pje_usuario = ""
-pje_senha = ""
+pje_senha   = ""
+pje_otp     = ""
 
 if auth_modo == "Certificado Digital (A1)":
     pfx_file = st.sidebar.file_uploader(
@@ -136,6 +137,12 @@ if auth_modo == "Certificado Digital (A1)":
 else:
     pje_usuario = st.sidebar.text_input("Usuario PJe (CPF, so numeros)")
     pje_senha   = st.sidebar.text_input("Senha PJe", type="password")
+    pje_otp     = st.sidebar.text_input(
+        "Segundo Fator (OTP)",
+        placeholder="Codigo do autenticador (se exigido)",
+        key="pje_otp_sidebar",
+        max_chars=8,
+    )
 
 # ── Corpo principal ───────────────────────────────────────────────────────────
 st.title("⚖️ Consulta de Processos PJe")
@@ -382,7 +389,7 @@ for sigla, doc in _resultados:
                             resultado_auth = client.autenticar_com_certificado(cert_obj.cert_tuple)
                             modo_usado     = "certificado digital"
                         else:
-                            resultado_auth = client.autenticar_com_senha(pje_usuario, pje_senha)
+                            resultado_auth = client.autenticar_com_senha(pje_usuario, pje_senha, pje_otp)
                             modo_usado     = "usuario e senha"
 
                     if resultado_auth == "otp_required":
