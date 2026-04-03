@@ -133,22 +133,29 @@ class PjeClient:
                 _log("  ✗ OTP invalido ou expirado")
                 return False
 
-            # Keycloak redirecionou para o PJe (URL contem o host do tribunal)
+            # Keycloak redirecionou para o PJe
             pje_host = self.base_url.split("//")[-1].split("/")[0]
             if pje_host in r.url and "sso.cloud" not in r.url:
-                # PJe pode retornar 400 no primeiro acesso ao callback mas ainda assim
-                # ter criado a sessao — verifica confirmando acesso a pagina protegida
-                _log(f"  → Redirecionado ao PJe (HTTP {r.status_code}) — verificando sessao")
-                test = self.session.get(
-                    f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
-                    timeout=TIMEOUT, allow_redirects=False,
-                )
-                loc = test.headers.get("Location", "")
-                _log(f"  → Verificacao: HTTP {test.status_code} | Location: {loc[:80]}")
-                if test.status_code == 200 or (test.status_code == 302 and "login" not in loc.lower() and "sso.cloud" not in loc):
-                    _log("  ✓ Sessao PJe ativa apos OTP")
+                if r.status_code == 200:
+                    _log(f"  ✓ Sessao PJe ativa — {r.url[:80]}")
                     return True
-                _log("  ✗ Sessao nao estabelecida (ainda redireciona para login)")
+                # Para status nao-200 no callback, tenta paginas conhecidas do PJe
+                _log(f"  → HTTP {r.status_code} no callback — verificando sessao")
+                for check_path in ["/pje/Painel/Painel/listView.seam", "/pje/painel/", "/pje/"]:
+                    try:
+                        test = self.session.get(f"{self.base_url}{check_path}",
+                                                timeout=TIMEOUT, allow_redirects=False)
+                        loc = test.headers.get("Location", "")
+                        _log(f"  → {check_path}: HTTP {test.status_code} | Loc: {loc[:60]}")
+                        if test.status_code == 200:
+                            _log("  ✓ Sessao ativa")
+                            return True
+                        if test.status_code == 302 and "login" not in loc.lower() and "sso.cloud" not in loc:
+                            _log("  ✓ Redirect interno — sessao ativa")
+                            return True
+                    except Exception:
+                        pass
+                _log("  ✗ Sessao invalida")
                 return False
 
             _log(f"  ✗ URL inesperada apos OTP: {r.url[:100]}")
@@ -239,20 +246,27 @@ class PjeClient:
                     return self._autenticar_keycloak_com_otp(otp)
                 return "otp_required"
 
-            # Redirecionado de volta ao PJe (qualquer status — PJe retorna 400 no callback normalmente)
+            # Redirecionado de volta ao PJe
             if pje_host in post_r.url and "sso.cloud" not in post_r.url:
-                _log(f"  → Redirecionado ao PJe (HTTP {post_r.status_code}) — verificando sessao")
-                test = self.session.get(
-                    f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
-                    timeout=TIMEOUT, allow_redirects=False,
-                )
-                loc = test.headers.get("Location", "")
-                _log(f"  → Sessao: HTTP {test.status_code} | Location: {loc[:80]}")
-                if test.status_code == 200 or (test.status_code == 302
-                        and "login" not in loc.lower() and "sso.cloud" not in loc):
-                    _log("  ✓ Sessao PJe ativa")
+                if post_r.status_code == 200:
+                    _log(f"  ✓ Sessao PJe ativa — {post_r.url[:80]}")
                     return True
-                _log("  ✗ Sessao invalida — redireciona para login")
+                _log(f"  → HTTP {post_r.status_code} no callback — verificando sessao")
+                for check_path in ["/pje/Painel/Painel/listView.seam", "/pje/painel/", "/pje/"]:
+                    try:
+                        test = self.session.get(f"{self.base_url}{check_path}",
+                                                timeout=TIMEOUT, allow_redirects=False)
+                        loc = test.headers.get("Location", "")
+                        _log(f"  → {check_path}: HTTP {test.status_code} | Loc: {loc[:60]}")
+                        if test.status_code == 200:
+                            _log("  ✓ Sessao ativa")
+                            return True
+                        if test.status_code == 302 and "login" not in loc.lower() and "sso.cloud" not in loc:
+                            _log("  ✓ Redirect interno — sessao ativa")
+                            return True
+                    except Exception:
+                        pass
+                _log("  ✗ Sessao invalida")
                 return False
 
             _log(f"  ✗ Resposta inesperada: URL={post_r.url[:80]} | body={post_r.text[:150]}")
