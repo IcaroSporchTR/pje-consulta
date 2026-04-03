@@ -471,12 +471,13 @@ for sigla, doc in _resultados:
                                     else:
                                         st.code(linha, language=None)
                     else:
-                        proc_id = proc_pje.get("id") or proc_pje.get("idProcesso")
+                        proc_id  = proc_pje.get("id") or proc_pje.get("idProcesso")
+                        proc_url = proc_pje.get("_url", "")
                         if not proc_id:
                             st.warning("ID interno do processo nao retornado pelo PJe.")
                         else:
                             with st.spinner("Buscando documentos..."):
-                                docs = client.listar_documentos(str(proc_id))
+                                docs = client.listar_documentos(str(proc_id), proc_url)
                             if not docs:
                                 st.info("Nenhum documento encontrado ou acesso restrito ao polo.")
                             else:

@@ -435,72 +435,199 @@ class PjeClient:
         except Exception:
             return None
 
-    def verificar_sessao(self) -> bool:
-        """Verifica se a sessao PJe esta ativa consultando endpoints conhecidos."""
-        _last_auth_log.append("=== Verificando sessao ===")
-        for path in [
-            "/pje/api/v1/usuario/logado",
-            "/pje/api/v1/usuario",
-            "/pje/ConsultaProcessual/listView.seam",
-        ]:
-            try:
-                r = self.session.get(f"{self.base_url}{path}", timeout=TIMEOUT, allow_redirects=False)
-                _last_auth_log.append(f"  GET {path} → {r.status_code} | Location: {r.headers.get('Location','')[:60]}")
-                if r.status_code == 200:
-                    _last_auth_log.append("  ✓ Sessao ativa")
-                    return True
-                if r.status_code == 302:
-                    loc = r.headers.get("Location", "")
-                    if "login" in loc.lower() or "sso.cloud" in loc:
-                        _last_auth_log.append("  ✗ Redirecionado para login — sessao invalida")
-                    else:
-                        _last_auth_log.append("  ✓ Redirect interno — sessao provavelmente ativa")
-                        return True
-            except Exception as e:
-                _last_auth_log.append(f"  ✗ Erro: {e}")
-        return False
-
     def buscar_processo(self, numero: str) -> dict | None:
         """
-        Tenta varios endpoints e formatos de numero.
-        Retorna o primeiro resultado encontrado ou None.
+        1. Tenta endpoints REST (PJe 1.x e 2.x)
+        2. Fallback: scraping da interface web do PJe
         """
         _last_auth_log.append("=== Busca de processo ===")
-        self.verificar_sessao()
-
         digitos = re.sub(r"\D", "", numero)
         if len(digitos) == 20:
             cnj = f"{digitos[0:7]}-{digitos[7:9]}.{digitos[9:13]}.{digitos[13]}.{digitos[14:16]}.{digitos[16:20]}"
         else:
             cnj = numero.strip()
 
+        # 1. Tenta REST
         for fmt_label, fmt_numero in [("CNJ", cnj), ("digitos", digitos)]:
             for template in PROCESS_PATHS:
                 url_path = template.format(numero=fmt_numero)
-                full_url = f"{self.base_url}{url_path}"
                 try:
-                    r = self.session.get(full_url, timeout=TIMEOUT, allow_redirects=True)
-                    _last_auth_log.append(f"  [{fmt_label}] {url_path[:70]} → {r.status_code}")
+                    r = self.session.get(f"{self.base_url}{url_path}", timeout=TIMEOUT, allow_redirects=True)
+                    _last_auth_log.append(f"  [{fmt_label}] {url_path[:65]} → {r.status_code}")
                     if r.status_code == 200:
                         try:
                             data = r.json()
                             if data:
-                                _last_auth_log.append(f"  ✓ Encontrado!")
+                                _last_auth_log.append("  ✓ Encontrado via REST!")
                                 return data
-                            _last_auth_log.append(f"  ⚠ 200 mas resposta vazia")
                         except Exception:
-                            _last_auth_log.append(f"  ⚠ 200 mas nao e JSON: {r.text[:80]}")
-                    elif r.status_code == 401:
-                        _last_auth_log.append("  ⚠ 401 — nao autorizado")
-                    elif r.status_code == 302:
-                        _last_auth_log.append(f"  ⚠ redirect → {r.headers.get('Location','')[:60]}")
+                            pass
                 except requests.RequestException as e:
-                    _last_auth_log.append(f"  ✗ Erro: {e}")
+                    _last_auth_log.append(f"  ✗ {e}")
 
-        _last_auth_log.append("  ✗ Nao encontrado em nenhum endpoint")
+        # 2. Fallback: scraping web
+        _last_auth_log.append("  → REST indisponivel; tentando interface web...")
+        return self._buscar_processo_web(cnj, digitos)
+
+    def _buscar_processo_web(self, cnj: str, digitos: str) -> dict | None:
+        """Busca o processo via interface web do PJe (scraping HTML)."""
+        consulta_paths = [
+            "/pje/Processo/ConsultaProcessual/listView.seam",
+            "/pje/ConsultaProcessual/listView.seam",
+            "/pje/advogado/processo/pesquisa.seam",
+            "/pje/ConsultaProcessual/processoPesquisar.seam",
+        ]
+        for path in consulta_paths:
+            try:
+                r = self.session.get(f"{self.base_url}{path}", timeout=TIMEOUT, allow_redirects=True)
+                _last_auth_log.append(f"  [web] GET {path} → {r.status_code} ({len(r.text)} bytes)")
+                if r.status_code != 200 or len(r.text) < 500:
+                    continue
+
+                # Extrai URL de action do form (preserva parametros Seam)
+                form_action_m = re.search(r'<form[^>]+action="([^"]+)"', r.text)
+                if form_action_m:
+                    action_raw = form_action_m.group(1).replace("&amp;", "&")
+                    action_url = action_raw if action_raw.startswith("http") else f"{self.base_url}{action_raw}"
+                else:
+                    action_url = f"{self.base_url}{path}"
+
+                # Extrai ViewState (suporta name= e id=)
+                vs_m = (
+                    re.search(r'name="javax\.faces\.ViewState"[^>]*value="([^"]+)"', r.text)
+                    or re.search(r'id="javax\.faces\.ViewState"[^>]*value="([^"]+)"', r.text)
+                )
+                if not vs_m:
+                    _last_auth_log.append(f"  [web] ViewState nao encontrado em {path}")
+                    continue
+
+                # Campo de numero do processo
+                num_field_m = re.search(
+                    r'name="([^"]*(?:numProcesso|numeroProcesso|numero_processo|nrProcesso|Processo)[^"]*)"',
+                    r.text, re.I
+                )
+                _last_auth_log.append(
+                    f"  [web] ViewState: sim | Action: {action_url[:70]} | "
+                    f"Campo numero: {num_field_m.group(1) if num_field_m else 'nao encontrado'}"
+                )
+
+                form_data = {"javax.faces.ViewState": vs_m.group(1)}
+                if num_field_m:
+                    form_data[num_field_m.group(1)] = cnj
+                else:
+                    # tenta nomes comuns quando nao encontrado via regex
+                    form_data["fPP:numProcesso:numProcesso"] = cnj
+                    form_data["numeroProcesso"]              = cnj
+
+                # Botao de pesquisa
+                btn_m = re.search(
+                    r'name="([^"]*(?:Pesquisar|pesquisar|buscar|Buscar|search|Search)[^"]*)"',
+                    r.text
+                )
+                if btn_m:
+                    form_data[btn_m.group(1)] = btn_m.group(1)
+
+                post_r = self.session.post(action_url, data=form_data,
+                                           timeout=TIMEOUT, allow_redirects=True)
+                _last_auth_log.append(
+                    f"  [web] POST → {post_r.status_code} | URL: {post_r.url[:100]} ({len(post_r.text)} bytes)"
+                )
+
+                if post_r.status_code not in (200, 302):
+                    continue
+
+                # Verifica se o ID do processo esta na URL apos redirect
+                url_id_m = re.search(r'[?&]idProcesso=(\d+)', post_r.url)
+                if url_id_m:
+                    pid = url_id_m.group(1)
+                    _last_auth_log.append(f"  ✓ ID do processo na URL apos redirect: {pid}")
+                    return {"id": pid, "idProcesso": pid, "numero": cnj,
+                            "_fonte": "web", "_url": post_r.url}
+
+                # Procura links com idProcesso no HTML da resposta
+                link_m = re.search(
+                    r'href="([^"]*idProcesso=(\d+)[^"]*)"',
+                    post_r.text, re.I
+                )
+                if link_m:
+                    pid  = link_m.group(2)
+                    href = link_m.group(1).replace("&amp;", "&")
+                    url_proc = href if href.startswith("http") else f"{self.base_url}{href}"
+                    _last_auth_log.append(f"  ✓ ID do processo em link HTML: {pid}")
+                    return {"id": pid, "idProcesso": pid, "numero": cnj,
+                            "_fonte": "web", "_url": url_proc}
+
+                # Procura idProcesso= em qualquer lugar no HTML
+                pid_m = re.search(r'idProcesso[="\s:]+(\d+)', post_r.text, re.I)
+                if pid_m:
+                    pid = pid_m.group(1)
+                    _last_auth_log.append(f"  ✓ ID do processo no HTML: {pid}")
+                    return {"id": pid, "idProcesso": pid, "numero": cnj, "_fonte": "web"}
+
+                # Numero CNJ aparece no resultado mesmo sem ID explicito
+                if cnj[:7] in post_r.text or digitos[:7] in post_r.text:
+                    _last_auth_log.append("  ✓ Processo localizado na pagina web (sem ID)")
+                    return {"numero": cnj, "_fonte": "web", "_html": post_r.text}
+
+                _last_auth_log.append("  ⚠ Pagina carregou mas processo nao encontrado no HTML")
+
+            except Exception as e:
+                _last_auth_log.append(f"  ✗ Erro web {path}: {e}")
+
+        _last_auth_log.append("  ✗ Nao encontrado via REST nem via web")
         return None
 
-    def listar_documentos(self, processo_id: str) -> list:
+    def listar_documentos_web(self, processo_id: str, processo_url: str = "") -> list:
+        """Lista documentos via interface web quando a API REST nao esta disponivel."""
+        doc_paths = [
+            f"/pje/Processo/ConsultaDocumento/listView.seam?idProcesso={processo_id}",
+            f"/pje/Processo/DetalheProcesso/listView.seam?idProcesso={processo_id}",
+            f"/pje/Processo/ConsultaProcessual/autos.seam?idProcesso={processo_id}",
+        ]
+        if processo_url and "idProcesso" not in processo_url:
+            doc_paths.insert(0, f"{processo_url}&tab=documentos")
+
+        docs = []
+        for path in doc_paths:
+            try:
+                url = path if path.startswith("http") else f"{self.base_url}{path}"
+                r = self.session.get(url, timeout=TIMEOUT, allow_redirects=True)
+                _last_auth_log.append(f"  [docs-web] GET {path[:80]} → {r.status_code}")
+                if r.status_code != 200 or len(r.text) < 500:
+                    continue
+
+                # Links de documentos: idDocumento=XXXXX
+                doc_links = re.findall(
+                    r'href="([^"]*idDocumento=(\d+)[^"]*)"',
+                    r.text, re.I
+                )
+                if doc_links:
+                    seen = set()
+                    for href, doc_id in doc_links:
+                        if doc_id in seen:
+                            continue
+                        seen.add(doc_id)
+                        doc_url = href.replace("&amp;", "&")
+                        if not doc_url.startswith("http"):
+                            doc_url = f"{self.base_url}{doc_url}"
+                        docs.append({
+                            "id":      doc_id,
+                            "tipo":    "",
+                            "nome":    f"Documento {doc_id}",
+                            "data":    "",
+                            "autor":   "",
+                            "url_pdf": doc_url,
+                        })
+                    _last_auth_log.append(f"  ✓ {len(docs)} documento(s) encontrado(s) via web")
+                    return docs
+
+                _last_auth_log.append("  ⚠ Pagina carregou mas sem links de documentos")
+            except Exception as e:
+                _last_auth_log.append(f"  ✗ Erro docs-web {path}: {e}")
+
+        return docs
+
+    def listar_documentos(self, processo_id: str, processo_url: str = "") -> list:
         for template in DOCS_PATHS:
             result = self._get(template.format(id=processo_id))
             if result:
@@ -516,7 +643,9 @@ class PjeClient:
                     }
                     for d in docs
                 ]
-        return []
+        # Fallback: scraping da interface web
+        _last_auth_log.append("  → REST documentos indisponivel; tentando interface web...")
+        return self.listar_documentos_web(processo_id, processo_url)
 
     def _url_pdf(self, doc: dict) -> str:
         doc_id = doc.get("id") or doc.get("idDocumento", "")
