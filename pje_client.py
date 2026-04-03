@@ -125,126 +125,126 @@ class PjeClient:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=TIMEOUT, allow_redirects=True
             )
-            _log(f"  → HTTP {r.status_code} | URL final: {r.url[:100]}")
+            _log(f"  → HTTP {r.status_code} | URL: {r.url[:100]}")
             body = r.text.lower()
+
+            # OTP invalido
             if any(x in body for x in ["otp inv", "codigo inv", "invalid", "incorrect", "expirou", "expired"]):
                 _log("  ✗ OTP invalido ou expirado")
                 return False
-            # Verifica se voltou ao PJe (autenticado)
-            if "pje." in r.url and "sso.cloud" not in r.url:
-                _log("  ✓ OTP aceito — redirecionado ao PJe")
-                return True
-            # Tenta acessar area restrita para confirmar sessao
-            test = self.session.get(
-                f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
-                timeout=TIMEOUT, allow_redirects=False
-            )
-            if test.status_code in (200, 302) and "login" not in test.headers.get("Location","").lower():
-                _log("  ✓ Sessao valida apos OTP")
-                return True
-            _log(f"  ✗ Sessao invalida apos OTP: {test.status_code}")
+
+            # Keycloak redirecionou para o PJe (URL contem o host do tribunal)
+            pje_host = self.base_url.split("//")[-1].split("/")[0]
+            if pje_host in r.url and "sso.cloud" not in r.url:
+                # PJe pode retornar 400 no primeiro acesso ao callback mas ainda assim
+                # ter criado a sessao — verifica confirmando acesso a pagina protegida
+                _log(f"  → Redirecionado ao PJe (HTTP {r.status_code}) — verificando sessao")
+                test = self.session.get(
+                    f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
+                    timeout=TIMEOUT, allow_redirects=False,
+                )
+                loc = test.headers.get("Location", "")
+                _log(f"  → Verificacao: HTTP {test.status_code} | Location: {loc[:80]}")
+                if test.status_code == 200 or (test.status_code == 302 and "login" not in loc.lower() and "sso.cloud" not in loc):
+                    _log("  ✓ Sessao PJe ativa apos OTP")
+                    return True
+                _log("  ✗ Sessao nao estabelecida (ainda redireciona para login)")
+                return False
+
+            _log(f"  ✗ URL inesperada apos OTP: {r.url[:100]}")
         except Exception as e:
             _log(f"  ✗ Erro ao enviar OTP: {e}")
         return False
 
-    def _autenticar_keycloak(self, usuario: str, senha: str, redirect_url: str, otp: str = "") -> bool:
+    def _autenticar_keycloak(self, usuario: str, senha: str, redirect_url: str,
+                             otp: str = "", login_html: str = "") -> bool:
         """
         Autentica via Keycloak SSO (sso.cloud.pje.jus.br).
-        Extrai realm e client_id da URL de redirect capturada no login.
-        Tenta Resource Owner Password Credentials (ROPC) grant.
+        Usa o HTML da pagina de login ja carregada (passado via login_html)
+        para preservar o state/nonce que o PJe criou — evita o erro 400.
         """
-        import re
-        # Extrai parametros do redirect: realm e client_id
-        realm_match     = re.search(r'/realms/([^/]+)/', redirect_url)
-        client_match    = re.search(r'client_id=([^&]+)', redirect_url)
-        redirect_match  = re.search(r'redirect_uri=([^&]+)', redirect_url)
+        realm_match  = re.search(r'/realms/([^/]+)/', redirect_url)
+        client_match = re.search(r'client_id=([^&]+)', redirect_url)
 
         if not realm_match or not client_match:
-            _log(f"  ✗ Nao foi possivel extrair realm/client_id da URL SSO")
+            _log("  ✗ Nao foi possivel extrair realm/client_id da URL SSO")
             return False
 
-        realm       = realm_match.group(1)
-        client_id   = requests.utils.unquote(client_match.group(1))
-        redirect_uri = requests.utils.unquote(redirect_match.group(1)) if redirect_match else ""
-
-        token_url = f"https://sso.cloud.pje.jus.br/auth/realms/{realm}/protocol/openid-connect/token"
+        realm     = realm_match.group(1)
+        client_id = requests.utils.unquote(client_match.group(1))
         _log(f"  [SSO/Keycloak] realm={realm} | client_id={client_id}")
-        _log(f"  Token URL: {token_url}")
 
-        # Tenta ROPC (Resource Owner Password Credentials)
-        payload = {
-            "grant_type": "password",
-            "client_id":  client_id,
-            "username":   usuario,
-            "password":   senha,
-            "scope":      "openid",
-        }
+        # Tenta ROPC primeiro (mais simples, falha se exigir client_secret)
+        token_url = f"https://sso.cloud.pje.jus.br/auth/realms/{realm}/protocol/openid-connect/token"
         try:
-            r = requests.post(token_url, data=payload, timeout=TIMEOUT)
-            _log(f"  → Keycloak ROPC HTTP {r.status_code}")
-            _log(f"  → Resposta: {r.text[:300]}")
-
+            r = requests.post(token_url, data={
+                "grant_type": "password", "client_id": client_id,
+                "username": usuario, "password": senha, "scope": "openid",
+            }, timeout=TIMEOUT)
+            _log(f"  → ROPC HTTP {r.status_code}")
             if r.ok:
-                data = r.json()
-                token = data.get("access_token")
+                token = r.json().get("access_token")
                 if token:
                     self._aplicar_token(token)
-                    _log("  ✓ Token Keycloak obtido com sucesso via ROPC")
+                    _log("  ✓ Token via ROPC")
                     return True
-                _log("  ✗ Resposta OK mas sem access_token")
             else:
                 err = r.json() if "application/json" in r.headers.get("Content-Type","") else {}
-                erro_msg = err.get("error_description") or err.get("error") or r.text[:200]
-                _log(f"  ✗ Keycloak recusou: {erro_msg}")
-                if "invalid_grant" in r.text:
-                    _log("  ✗ Credenciais invalidas (usuario ou senha errados)")
-                if "otp" in r.text.lower() or "totp" in r.text.lower():
-                    _log("  ⚠ KEYCLOAK EXIGE OTP/2FA — necessario segundo fator")
+                _log(f"  ✗ ROPC recusado: {err.get('error_description') or r.text[:120]}")
         except Exception as e:
-            _log(f"  ✗ Erro ao contactar Keycloak: {e}")
+            _log(f"  ✗ Erro ROPC: {e}")
 
-        # Fallback: tenta o fluxo Authorization Code via POST direto no Keycloak
+        # Authorization Code flow — usa o HTML JA carregado para manter o state do PJe
         try:
-            auth_url = f"https://sso.cloud.pje.jus.br/auth/realms/{realm}/protocol/openid-connect/auth"
-            _log(f"  [SSO] Tentando Authorization Code flow em {auth_url}")
-            # Busca pagina de login do Keycloak
-            get_r = self.session.get(
-                f"{auth_url}?response_type=code&client_id={client_id}"
-                f"&redirect_uri={requests.utils.quote(redirect_uri)}&scope=openid",
-                timeout=TIMEOUT
-            )
-            _log(f"  → GET login Keycloak: HTTP {get_r.status_code} | URL: {get_r.url[:100]}")
-            html = get_r.text
-            # Localiza action do formulario de login
+            if login_html:
+                html = login_html
+                _log("  → Usando pagina Keycloak ja carregada (state preservado)")
+            else:
+                redirect_match = re.search(r'redirect_uri=([^&]+)', redirect_url)
+                redirect_uri   = requests.utils.unquote(redirect_match.group(1)) if redirect_match else ""
+                auth_url = (f"https://sso.cloud.pje.jus.br/auth/realms/{realm}"
+                            f"/protocol/openid-connect/auth"
+                            f"?response_type=code&client_id={client_id}"
+                            f"&redirect_uri={requests.utils.quote(redirect_uri)}&scope=openid")
+                gr = self.session.get(auth_url, timeout=TIMEOUT)
+                html = gr.text
+                _log(f"  → GET Keycloak: HTTP {gr.status_code}")
+
             action = re.search(r'action="([^"]+)"', html)
-            if action:
-                login_action = action.group(1).replace("&amp;", "&")
-                _log(f"  → Form action: {login_action[:100]}")
-                post_r = self.session.post(
-                    login_action,
-                    data={"username": usuario, "password": senha, "credentialId": ""},
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    timeout=TIMEOUT, allow_redirects=True
-                )
-                _log(f"  → POST Keycloak form: HTTP {post_r.status_code} | URL final: {post_r.url[:100]}")
-                body_lower = post_r.text.lower()
-                otp_action = re.search(r'action="([^"]+)"', post_r.text)
-                if ("otp" in body_lower or "totp" in body_lower or "verification" in body_lower
-                        or "segundo fator" in body_lower or "authenticator" in body_lower):
-                    _log("  ⚠ SEGUNDO FATOR (OTP) EXIGIDO")
-                    if otp_action:
-                        self._keycloak_otp_action = otp_action.group(1).replace("&amp;", "&")
-                    if otp and otp_action:
-                        # OTP ja fornecido — submete direto sem aguardar o frontend
-                        _log(f"  → Submetendo OTP fornecido diretamente")
-                        return self._autenticar_keycloak_com_otp(otp)
-                    _log(f"  OTP action salva: {self._keycloak_otp_action[:80] if otp_action else 'nao encontrada'}")
-                    return "otp_required"  # sinal para o frontend pedir o codigo
-                elif "pje.tjmg" in post_r.url or (redirect_uri and redirect_uri.split("/")[2] in post_r.url):
-                    _log("  ✓ Redirecionado de volta ao PJe — autenticacao bem sucedida")
+            if not action:
+                _log("  ✗ Form action nao encontrado na pagina de login")
+                return False
+
+            login_action = action.group(1).replace("&amp;", "&")
+            _log(f"  → POST credenciais: {login_action[:80]}")
+            post_r = self.session.post(
+                login_action,
+                data={"username": usuario, "password": senha, "credentialId": ""},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=TIMEOUT, allow_redirects=True,
+            )
+            _log(f"  → HTTP {post_r.status_code} | URL: {post_r.url[:100]}")
+
+            # Verifica se voltou ao PJe com sucesso
+            pje_host = self.base_url.split("//")[-1].split("/")[0]
+            if pje_host in post_r.url and "sso.cloud" not in post_r.url:
+                if post_r.status_code in (200, 302):
+                    _log("  ✓ Redirecionado ao PJe — sessao estabelecida")
                     return True
-                else:
-                    _log(f"  ✗ Pos-login inesperado: {post_r.text[:300]}")
+
+            body_lower = post_r.text.lower()
+            otp_match  = re.search(r'action="([^"]+)"', post_r.text)
+
+            if any(x in body_lower for x in ("otp", "totp", "verification", "segundo fator", "authenticator")):
+                _log("  ⚠ SEGUNDO FATOR (OTP) EXIGIDO")
+                if otp_match:
+                    self._keycloak_otp_action = otp_match.group(1).replace("&amp;", "&")
+                if otp and otp_match:
+                    _log("  → Submetendo OTP diretamente")
+                    return self._autenticar_keycloak_com_otp(otp)
+                return "otp_required"
+
+            _log(f"  ✗ Resposta inesperada apos login: {post_r.text[:200]}")
         except Exception as e:
             _log(f"  ✗ Erro no Authorization Code flow: {e}")
 
@@ -311,11 +311,14 @@ class PjeClient:
                 # Detecta redirecionamento para Keycloak SSO
                 if "sso.cloud.pje.jus.br" in get_r.url:
                     _log(f"  → Detectado Keycloak SSO — usando fluxo OAuth")
-                    resultado_kc = self._autenticar_keycloak(usuario, senha, get_r.url, otp=otp)
+                    # Passa o HTML ja carregado para preservar o state/nonce do PJe
+                    resultado_kc = self._autenticar_keycloak(
+                        usuario, senha, get_r.url, otp=otp, login_html=get_r.text
+                    )
                     if resultado_kc is True:
                         return True
                     if resultado_kc == "otp_required":
-                        return "otp_required"  # propaga sinal para o frontend
+                        return "otp_required"
                     continue
 
                 _log(f"  ViewState encontrado: {'sim' if viewstate else 'nao'}")
