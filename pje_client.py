@@ -469,69 +469,133 @@ class PjeClient:
         _last_auth_log.append("  → REST indisponivel; tentando interface web...")
         return self._buscar_processo_web(cnj, digitos)
 
+    def _obter_urls_consulta_do_menu(self) -> list:
+        """
+        Navega pelo menu do PJe autenticado e retorna paths de consulta processual.
+        Usado quando os paths padrao nao existem no tribunal (ex.: TJMG).
+        """
+        home_url = f"{self.base_url}/pje/QuadroAviso/listViewQuadroAvisoMensagem.seam"
+        try:
+            r = self.session.get(home_url, timeout=TIMEOUT, allow_redirects=True)
+            _last_auth_log.append(f"  [nav] QuadroAviso → {r.status_code} | {len(r.text)} bytes")
+            if r.status_code != 200:
+                return []
+
+            # Extrai todos os hrefs de paginas .seam do PJe
+            hrefs = re.findall(r'href="(/pje[^"]+\.seam[^"]*)"', r.text)
+            # Remove duplicatas mantendo ordem
+            hrefs = list(dict.fromkeys(hrefs))
+
+            # Filtra por candidatos de consulta/processo
+            candidatos = []
+            for h in hrefs:
+                low = h.lower()
+                if any(x in low for x in ("login", "logout", "aviso", "ajax", "painel", "senha")):
+                    continue
+                if any(x in low for x in ("consulta", "processo", "pesquis", "autos")):
+                    candidatos.append(h)
+
+            _last_auth_log.append(
+                f"  [nav] {len(hrefs)} links totais | {len(candidatos)} candidatos de consulta"
+            )
+            for c in candidatos[:8]:
+                _last_auth_log.append(f"  [nav]   {c}")
+
+            return candidatos
+        except Exception as e:
+            _last_auth_log.append(f"  [nav] Erro ao navegar menu: {e}")
+            return []
+
     def _buscar_processo_web(self, cnj: str, digitos: str) -> dict | None:
         """Busca o processo via interface web do PJe (scraping HTML)."""
-        consulta_paths = [
+
+        # Descobre os caminhos reais a partir do menu autenticado,
+        # depois completa com paths padrao PJe 1.x como fallback.
+        paths_do_menu = self._obter_urls_consulta_do_menu()
+        paths_fallback = [
             "/pje/Processo/ConsultaProcessual/listView.seam",
             "/pje/ConsultaProcessual/listView.seam",
             "/pje/advogado/processo/pesquisa.seam",
             "/pje/ConsultaProcessual/processoPesquisar.seam",
         ]
+        vistos = set()
+        consulta_paths = []
+        for p in paths_do_menu + paths_fallback:
+            if p not in vistos:
+                vistos.add(p)
+                consulta_paths.append(p)
+
         for path in consulta_paths:
             try:
-                r = self.session.get(f"{self.base_url}{path}", timeout=TIMEOUT, allow_redirects=True)
-                _last_auth_log.append(f"  [web] GET {path} → {r.status_code} ({len(r.text)} bytes)")
+                url_get = path if path.startswith("http") else f"{self.base_url}{path}"
+                r = self.session.get(url_get, timeout=TIMEOUT, allow_redirects=True)
+                _last_auth_log.append(f"  [web] GET {path[:70]} → {r.status_code} ({len(r.text)} bytes) | url={r.url[:80]}")
                 if r.status_code != 200 or len(r.text) < 500:
                     continue
 
-                # Extrai URL de action do form (preserva parametros Seam)
-                form_action_m = re.search(r'<form[^>]+action="([^"]+)"', r.text)
-                if form_action_m:
-                    action_raw = form_action_m.group(1).replace("&amp;", "&")
-                    action_url = action_raw if action_raw.startswith("http") else f"{self.base_url}{action_raw}"
-                else:
-                    action_url = f"{self.base_url}{path}"
+                # Diagnostico: primeiros 400 chars do HTML (revela estrutura da pagina)
+                _last_auth_log.append(f"  [web] HTML[0:400]: {r.text[:400]!r}")
+
+                # Encontra o form principal (id="fPP" e PJe padrao; se nao, pega o primeiro)
+                form_tag_m = (
+                    re.search(r'(<form[^>]*id="fPP"[^>]*>)', r.text, re.I | re.DOTALL)
+                    or re.search(r'(<form[^>]*>)',           r.text, re.I | re.DOTALL)
+                )
+                action_url = url_get  # fallback: mesma URL
+                if form_tag_m:
+                    act_m = re.search(r'action="([^"]+)"', form_tag_m.group(1))
+                    if act_m:
+                        action_raw = act_m.group(1).replace("&amp;", "&")
+                        action_url = action_raw if action_raw.startswith("http") else f"{self.base_url}{action_raw}"
 
                 # Extrai ViewState (suporta name= e id=)
                 vs_m = (
                     re.search(r'name="javax\.faces\.ViewState"[^>]*value="([^"]+)"', r.text)
-                    or re.search(r'id="javax\.faces\.ViewState"[^>]*value="([^"]+)"', r.text)
+                    or re.search(r'id="javax\.faces\.ViewState"\s+value="([^"]+)"', r.text)
+                    or re.search(r'javax\.faces\.ViewState[^>]*value="([^"]+)"', r.text)
                 )
                 if not vs_m:
-                    _last_auth_log.append(f"  [web] ViewState nao encontrado em {path}")
+                    _last_auth_log.append(f"  [web] ViewState NAO encontrado — pagina nao e JSF/Seam")
                     continue
 
-                # Campo de numero do processo
-                num_field_m = re.search(
-                    r'name="([^"]*(?:numProcesso|numeroProcesso|numero_processo|nrProcesso|Processo)[^"]*)"',
-                    r.text, re.I
+                # Todos os campos name= da pagina (para diagnostico)
+                all_names = re.findall(r'name="([^"]+)"', r.text)
+                _last_auth_log.append(f"  [web] Campos name= na pagina: {all_names[:20]}")
+
+                # Campo de numero do processo — tenta por nome exato, depois por padrao
+                num_field_m = next(
+                    (n for n in all_names if any(
+                        x in n.lower() for x in ("numprocesso", "numeroprocesso", "nrprocesso", "numproc")
+                    )), None
                 )
                 _last_auth_log.append(
-                    f"  [web] ViewState: sim | Action: {action_url[:70]} | "
-                    f"Campo numero: {num_field_m.group(1) if num_field_m else 'nao encontrado'}"
+                    f"  [web] Action: {action_url[:70]} | "
+                    f"Campo numero: {num_field_m or 'nao encontrado'}"
                 )
 
                 form_data = {"javax.faces.ViewState": vs_m.group(1)}
                 if num_field_m:
-                    form_data[num_field_m.group(1)] = cnj
+                    form_data[num_field_m] = cnj
                 else:
-                    # tenta nomes comuns quando nao encontrado via regex
                     form_data["fPP:numProcesso:numProcesso"] = cnj
                     form_data["numeroProcesso"]              = cnj
 
-                # Botao de pesquisa
-                btn_m = re.search(
-                    r'name="([^"]*(?:Pesquisar|pesquisar|buscar|Buscar|search|Search)[^"]*)"',
-                    r.text
+                # Botao de pesquisa — nome mais comum no PJe 1.x e depois regex
+                btn_name = next(
+                    (n for n in all_names if any(
+                        x in n.lower() for x in ("searchprocessos", "pesquisar", "buscar", "search")
+                    )), None
                 )
-                if btn_m:
-                    form_data[btn_m.group(1)] = btn_m.group(1)
+                if btn_name:
+                    form_data[btn_name] = btn_name
 
                 post_r = self.session.post(action_url, data=form_data,
                                            timeout=TIMEOUT, allow_redirects=True)
                 _last_auth_log.append(
                     f"  [web] POST → {post_r.status_code} | URL: {post_r.url[:100]} ({len(post_r.text)} bytes)"
                 )
+                # Diagnostico da resposta
+                _last_auth_log.append(f"  [web] RESP[0:400]: {post_r.text[:400]!r}")
 
                 if post_r.status_code not in (200, 302):
                     continue
