@@ -32,9 +32,15 @@ AUTH_SENHA_PATHS = [
     "/seam/resource/rest/usuario/autenticar",
 ]
 PROCESS_PATHS = [
-    "/pje/seam/resource/rest/processo/consultarByNumero/{numero}",
+    # PJe 2.x — query param
+    "/pje/api/v1/processo/consultarProcesso?numero={numero}",
+    "/pje/api/v1/processo?numero={numero}",
+    "/pje/api/v1/consultaProcessual/processo?numero={numero}",
+    # PJe 2.x — path param
     "/pje/api/v1/processo/{numero}",
-    "/pje/api/processo/{numero}",
+    "/pje/api/v1/processo/consultarByNumero/{numero}",
+    # PJe 1.x legacy
+    "/pje/seam/resource/rest/processo/consultarByNumero/{numero}",
     "/seam/resource/rest/processo/consultarByNumero/{numero}",
     "/pje/seam/resource/rest/consultaPublica/processo/{numero}",
 ]
@@ -401,15 +407,40 @@ class PjeClient:
         except Exception:
             return None
 
+    def verificar_sessao(self) -> bool:
+        """Verifica se a sessao PJe esta ativa consultando endpoints conhecidos."""
+        _last_auth_log.append("=== Verificando sessao ===")
+        for path in [
+            "/pje/api/v1/usuario/logado",
+            "/pje/api/v1/usuario",
+            "/pje/ConsultaProcessual/listView.seam",
+        ]:
+            try:
+                r = self.session.get(f"{self.base_url}{path}", timeout=TIMEOUT, allow_redirects=False)
+                _last_auth_log.append(f"  GET {path} → {r.status_code} | Location: {r.headers.get('Location','')[:60]}")
+                if r.status_code == 200:
+                    _last_auth_log.append("  ✓ Sessao ativa")
+                    return True
+                if r.status_code == 302:
+                    loc = r.headers.get("Location", "")
+                    if "login" in loc.lower() or "sso.cloud" in loc:
+                        _last_auth_log.append("  ✗ Redirecionado para login — sessao invalida")
+                    else:
+                        _last_auth_log.append("  ✓ Redirect interno — sessao provavelmente ativa")
+                        return True
+            except Exception as e:
+                _last_auth_log.append(f"  ✗ Erro: {e}")
+        return False
+
     def buscar_processo(self, numero: str) -> dict | None:
         """
         Tenta varios endpoints e formatos de numero.
         Retorna o primeiro resultado encontrado ou None.
         """
         _last_auth_log.append("=== Busca de processo ===")
-        # Formatos a tentar: so digitos e formato CNJ com pontuacao
+        self.verificar_sessao()
+
         digitos = re.sub(r"\D", "", numero)
-        # Reconstroi formato CNJ se o numero tiver 20 digitos
         if len(digitos) == 20:
             cnj = f"{digitos[0:7]}-{digitos[7:9]}.{digitos[9:13]}.{digitos[13]}.{digitos[14:16]}.{digitos[16:20]}"
         else:
@@ -421,21 +452,24 @@ class PjeClient:
                 full_url = f"{self.base_url}{url_path}"
                 try:
                     r = self.session.get(full_url, timeout=TIMEOUT, allow_redirects=True)
-                    _last_auth_log.append(f"  [processo/{fmt_label}] GET {url_path} → {r.status_code}")
+                    _last_auth_log.append(f"  [{fmt_label}] {url_path[:70]} → {r.status_code}")
                     if r.status_code == 200:
                         try:
                             data = r.json()
                             if data:
-                                _last_auth_log.append(f"  ✓ Encontrado via {url_path}")
+                                _last_auth_log.append(f"  ✓ Encontrado!")
                                 return data
+                            _last_auth_log.append(f"  ⚠ 200 mas resposta vazia")
                         except Exception:
-                            pass
+                            _last_auth_log.append(f"  ⚠ 200 mas nao e JSON: {r.text[:80]}")
                     elif r.status_code == 401:
-                        _last_auth_log.append("  ⚠ Nao autorizado (sessao pode ter expirado)")
+                        _last_auth_log.append("  ⚠ 401 — nao autorizado")
+                    elif r.status_code == 302:
+                        _last_auth_log.append(f"  ⚠ redirect → {r.headers.get('Location','')[:60]}")
                 except requests.RequestException as e:
                     _last_auth_log.append(f"  ✗ Erro: {e}")
 
-        _last_auth_log.append("  ✗ Processo nao encontrado em nenhum endpoint")
+        _last_auth_log.append("  ✗ Nao encontrado em nenhum endpoint")
         return None
 
     def listar_documentos(self, processo_id: str) -> list:

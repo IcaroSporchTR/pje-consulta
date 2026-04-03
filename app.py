@@ -170,22 +170,21 @@ else:
                 with st.sidebar.status("Conectando...", expanded=True) as _status:
                     _client_pre = PjeClient(_info_pre[1])
                     _res = _client_pre.autenticar_com_senha(pje_usuario, pje_senha, pje_otp)
+                    _log_pre = get_auth_log()
                     if _res is True:
                         st.session_state.pje_auth_cliente[_sigla_pre] = _client_pre
                         st.session_state.pje_otp_pending = False
                         _status.update(label=f"Conectado ao {_sigla_pre}!", state="complete")
                         st.rerun()
                     elif _res == "otp_required":
-                        _status.update(label="Preencha o codigo OTP acima e clique Conectar novamente.", state="error")
+                        _status.update(label="OTP exigido — preencha o codigo acima e clique Conectar novamente.", state="error")
                         st.session_state.pje_otp_pending = True
                         st.session_state.pje_otp_sigla   = _sigla_pre
                         st.session_state.pje_client_otp  = _client_pre
                     else:
-                        _status.update(label="Falha na autenticacao.", state="error")
-                        _log_pre = get_auth_log()
-                        if _log_pre:
-                            for _l in _log_pre[-6:]:
-                                st.sidebar.caption(_l)
+                        _status.update(label="Falha na autenticacao — veja o log abaixo.", state="error")
+                    if _log_pre and _res is not True:
+                        st.session_state["_ultimo_log_auth"] = _log_pre
 
 # ── Corpo principal ───────────────────────────────────────────────────────────
 st.title("⚖️ Consulta de Processos PJe")
@@ -450,14 +449,20 @@ for sigla, doc in _resultados:
                         proc_pje = client.buscar_processo(_numero)
 
                     if not proc_pje:
-                        st.warning("Processo nao encontrado no PJe autenticado.")
+                        st.warning("Processo nao encontrado via API do PJe autenticado.")
+                        pje_url_consulta = f"{pje_url}/pje/ConsultaProcessual/listView.seam"
+                        st.info(
+                            f"A API REST do TJMG pode nao expor esse endpoint. "
+                            f"Voce pode [abrir o processo diretamente no PJe]({pje_url_consulta}) "
+                            f"usando a sessao autenticada do navegador."
+                        )
                         log_busca = get_auth_log()
                         if log_busca:
-                            with st.expander("Log de tentativas de busca", expanded=True):
+                            with st.expander("Log de tentativas de busca", expanded=False):
                                 for linha in log_busca:
                                     if "✓" in linha:
                                         st.success(linha)
-                                    elif "✗" in linha or "Nao autorizado" in linha:
+                                    elif "✗" in linha:
                                         st.error(linha)
                                     elif "⚠" in linha:
                                         st.warning(linha)
