@@ -472,7 +472,7 @@ class PjeClient:
     def _obter_urls_consulta_do_menu(self) -> list:
         """
         Navega pelo menu do PJe autenticado e retorna paths de consulta processual.
-        Usado quando os paths padrao nao existem no tribunal (ex.: TJMG).
+        Busca ampla: href, onclick, JS, data-* — o menu do TJMG e JavaScript-driven.
         """
         home_url = f"{self.base_url}/pje/QuadroAviso/listViewQuadroAvisoMensagem.seam"
         try:
@@ -481,26 +481,46 @@ class PjeClient:
             if r.status_code != 200:
                 return []
 
-            # Extrai todos os hrefs de paginas .seam do PJe
-            hrefs = re.findall(r'href="(/pje[^"]+\.seam[^"]*)"', r.text)
-            # Remove duplicatas mantendo ordem
-            hrefs = list(dict.fromkeys(hrefs))
+            # Coleta ampla: qualquer trecho que contenha "/pje/" no HTML inteiro
+            # (href, onclick, window.location, JSON, data-url, etc.)
+            raw_paths = re.findall(r'(/pje/[A-Za-z0-9_./?=&%;:-]{4,})', r.text)
+            url_set = list(dict.fromkeys(raw_paths))  # dedup mantendo ordem
 
-            # Filtra por candidatos de consulta/processo
+            _last_auth_log.append(f"  [nav] {len(url_set)} caminhos /pje/ no HTML")
+            for u in url_set[:20]:
+                _last_auth_log.append(f"  [nav]   {u}")
+
+            # Linhas do HTML que contenham "Consulta" ou "Processo" (menu textual)
+            kw_lines = [
+                ln.strip() for ln in r.text.splitlines()
+                if re.search(r'[Cc]onsult|[Pp]rocesso', ln) and ln.strip()
+                   and len(ln.strip()) < 300
+            ]
+            _last_auth_log.append(f"  [nav] {len(kw_lines)} linhas HTML com Consulta/Processo:")
+            for ln in kw_lines[:12]:
+                _last_auth_log.append(f"  [nav]   {ln[:200]}")
+
+            # Snippet inicial do HTML para ver estrutura geral
+            _last_auth_log.append(f"  [nav] HTML[0:600]: {r.text[:600]!r}")
+
+            # Filtra candidatos de consulta descartando ruido
+            skip = ("login", "logout", "aviso", "painel", "ajax", "resource",
+                    ".js", ".css", ".png", ".ico", "conversationId", "javax")
+            want = ("consulta", "processo", "pesquis", "autos", "tarefa", "audiencia")
             candidatos = []
-            for h in hrefs:
-                low = h.lower()
-                if any(x in low for x in ("login", "logout", "aviso", "ajax", "painel", "senha")):
+            for p in url_set:
+                low = p.lower()
+                if any(x in low for x in skip):
                     continue
-                if any(x in low for x in ("consulta", "processo", "pesquis", "autos")):
-                    candidatos.append(h)
+                if any(x in low for x in want):
+                    # Normaliza: remove query string para a tentativa GET
+                    clean = p.split("?")[0].split(";")[0]
+                    if clean not in candidatos:
+                        candidatos.append(clean)
 
             _last_auth_log.append(
-                f"  [nav] {len(hrefs)} links totais | {len(candidatos)} candidatos de consulta"
+                f"  [nav] {len(candidatos)} candidatos de consulta apos filtro"
             )
-            for c in candidatos[:8]:
-                _last_auth_log.append(f"  [nav]   {c}")
-
             return candidatos
         except Exception as e:
             _last_auth_log.append(f"  [nav] Erro ao navegar menu: {e}")
