@@ -176,7 +176,6 @@ if btn_buscar:
 
     numero = numero_input.strip()
 
-    # Determina tribunal(is) para busca
     if buscar_todos:
         indices_busca = [(sig, v[2]) for sig, v in TRIBUNAIS.items()]
         with st.spinner("Buscando em todos os tribunais..."):
@@ -213,253 +212,257 @@ if btn_buscar:
         st.warning("Processo nao encontrado em nenhum tribunal consultado.")
         st.stop()
 
-    # ── Exibe resultados ──────────────────────────────────────────────────────
-    for sigla, doc in resultados:
-        tribunal_nome = TRIBUNAIS.get(sigla, ("", "", ""))[0] if sigla in TRIBUNAIS else sigla
-        st.markdown(f"## {sigla} — {tribunal_nome}")
+    # Persiste resultados no session_state para sobreviver reruns (OTP, etc.)
+    st.session_state.pje_resultados     = resultados
+    st.session_state.pje_numero_buscado = numero
+    # Nova busca descarta OTP pendente de busca anterior (mantém pre_auth ja confirmado)
+    st.session_state.pje_otp_pending = False
+    st.session_state.pje_client_otp  = None
 
-        basicos = extrair_dados_basicos(doc)
-        partes  = extrair_partes(doc)
-        movs    = extrair_movimentos(doc)
-        docs_datajud = extrair_documentos(doc)
+# ── Exibe resultados (sempre a partir do session_state) ───────────────────────
+_resultados = st.session_state.get("pje_resultados", [])
+_numero     = st.session_state.get("pje_numero_buscado", "")
 
-        # KPIs rapidos
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Numero",         basicos["numero"] or numero)
-        k2.metric("Classe",         basicos["classe"] or "—")
-        k3.metric("Orgao Julgador", basicos["orgao"]  or "—")
-        k4.metric("Ajuizamento",    basicos["data_ajuiz"] or "—")
-        k5.metric("Documentos",     len(docs_datajud) if docs_datajud else "Via PJe")
+for sigla, doc in _resultados:
+    tribunal_nome = TRIBUNAIS.get(sigla, ("", "", ""))[0] if sigla in TRIBUNAIS else sigla
+    st.markdown(f"## {sigla} — {tribunal_nome}")
 
-        tab_dados, tab_partes, tab_movimentos, tab_docs_datajud, tab_documentos = st.tabs(
-            ["Dados Basicos", "Partes", "Movimentacoes", "Documentos (DataJud)", "Documentos (PJe autenticado)"]
-        )
+    basicos      = extrair_dados_basicos(doc)
+    partes       = extrair_partes(doc)
+    movs         = extrair_movimentos(doc)
+    docs_datajud = extrair_documentos(doc)
 
-        # ── Dados basicos ─────────────────────────────────────────────────────
-        with tab_dados:
-            # Dados brutos completos
-            with st.expander("JSON completo do processo (todos os campos)", expanded=False):
-                st.json(doc)
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.write("**Numero**",          basicos["numero"] or numero)
-                st.write("**Classe**",           f"{basicos['classe']} (cod. {basicos['classe_codigo']})" if basicos['classe_codigo'] else basicos['classe'] or "—")
-                st.write("**Grau**",             basicos["grau"]   or "—")
-                st.write("**Tribunal**",         basicos["tribunal"] or sigla)
-                st.write("**Sistema**",          basicos["sistema"] or "—")
-                st.write("**Formato**",          basicos["formato"] or "—")
-                st.write("**Nivel de Sigilo**",  basicos["nivel_sigilo"])
-                st.write("**Prioridade**",       basicos["prioridade"] or "—")
-            with col_b:
-                st.write("**Orgao Julgador**",   basicos["orgao"] or "—")
-                st.write("**Codigo Orgao**",     basicos["orgao_codigo"] or "—")
-                st.write("**Municipio/UF**",     f"{basicos['orgao_municipio']} / {basicos['orgao_uf']}" if basicos['orgao_municipio'] else "—")
-                st.write("**Ajuizamento**",      basicos["data_ajuiz"]  or "—")
-                st.write("**Ultima atualizacao**", basicos["ultima_atualiz"] or "—")
-                st.write("**Valor da Causa**",   basicos["valor_causa"] or "—")
-                st.write("**Assuntos**",         " | ".join(basicos["assuntos"]) or "—")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Numero",         basicos["numero"] or _numero)
+    k2.metric("Classe",         basicos["classe"] or "—")
+    k3.metric("Orgao Julgador", basicos["orgao"]  or "—")
+    k4.metric("Ajuizamento",    basicos["data_ajuiz"] or "—")
+    k5.metric("Documentos",     len(docs_datajud) if docs_datajud else "Via PJe")
 
-        # ── Partes ────────────────────────────────────────────────────────────
-        with tab_partes:
-            if not partes:
-                st.info("Nenhuma parte encontrada.")
-            else:
-                for polo_label in ["ATIVO", "PASSIVO", "TERCEIRO", "TESTEMUNHA"]:
-                    grupo = [p for p in partes if p["polo"].upper() == polo_label]
-                    if not grupo:
-                        continue
-                    st.subheader(polo_label)
-                    for p in grupo:
-                        with st.expander(f"**{p['nome']}**" + (f"  —  {p['documento']}" if p['documento'] else "")):
-                            if p["advogados"]:
-                                st.write("**Advogados:**")
-                                for adv in p["advogados"]:
-                                    oab = f" (OAB: {adv['oab']})" if adv["oab"] else ""
-                                    st.write(f"- {adv['nome']}{oab}")
-                            else:
-                                st.write("Sem advogados cadastrados.")
+    tab_dados, tab_partes, tab_movimentos, tab_docs_datajud, tab_documentos = st.tabs(
+        ["Dados Basicos", "Partes", "Movimentacoes", "Documentos (DataJud)", "Documentos (PJe autenticado)"]
+    )
 
-                # Partes com polo nao mapeado
-                outros = [p for p in partes if p["polo"].upper() not in ["ATIVO","PASSIVO","TERCEIRO","TESTEMUNHA"]]
-                for p in outros:
-                    st.write(f"**{p['polo'].upper()}**: {p['nome']}")
+    # ── Dados basicos ─────────────────────────────────────────────────────────
+    with tab_dados:
+        with st.expander("JSON completo do processo (todos os campos)", expanded=False):
+            st.json(doc)
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write("**Numero**",          basicos["numero"] or _numero)
+            st.write("**Classe**",           f"{basicos['classe']} (cod. {basicos['classe_codigo']})" if basicos['classe_codigo'] else basicos['classe'] or "—")
+            st.write("**Grau**",             basicos["grau"]   or "—")
+            st.write("**Tribunal**",         basicos["tribunal"] or sigla)
+            st.write("**Sistema**",          basicos["sistema"] or "—")
+            st.write("**Formato**",          basicos["formato"] or "—")
+            st.write("**Nivel de Sigilo**",  basicos["nivel_sigilo"])
+            st.write("**Prioridade**",       basicos["prioridade"] or "—")
+        with col_b:
+            st.write("**Orgao Julgador**",   basicos["orgao"] or "—")
+            st.write("**Codigo Orgao**",     basicos["orgao_codigo"] or "—")
+            st.write("**Municipio/UF**",     f"{basicos['orgao_municipio']} / {basicos['orgao_uf']}" if basicos['orgao_municipio'] else "—")
+            st.write("**Ajuizamento**",      basicos["data_ajuiz"]  or "—")
+            st.write("**Ultima atualizacao**", basicos["ultima_atualiz"] or "—")
+            st.write("**Valor da Causa**",   basicos["valor_causa"] or "—")
+            st.write("**Assuntos**",         " | ".join(basicos["assuntos"]) or "—")
 
-        # ── Movimentacoes ─────────────────────────────────────────────────────
-        with tab_movimentos:
-            if not movs:
-                st.info("Nenhuma movimentacao encontrada.")
-            else:
-                st.write(f"**{len(movs)} movimentacao(oes) encontrada(s)**")
-                df_movs = pd.DataFrame(movs)
-                df_movs.columns = ["Data", "Codigo", "Nome", "Complemento"]
-                st.dataframe(
-                    df_movs[["Data", "Nome", "Complemento"]],
-                    use_container_width=True,
-                    height=400,
-                )
-                st.download_button(
-                    "Exportar movimentacoes CSV",
-                    data=df_movs.to_csv(index=False).encode("utf-8"),
-                    file_name=f"movimentacoes_{numero.replace('.','').replace('-','')}.csv",
-                    mime="text/csv",
-                )
-
-        # ── Documentos DataJud ───────────────────────────────────────────────
-        with tab_docs_datajud:
-            if not docs_datajud:
-                st.info(
-                    "Este tribunal nao envia documentos via DataJud (API publica).\n\n"
-                    "Use a aba **Documentos (PJe autenticado)** com certificado digital para acessar as pecas."
-                )
-            else:
-                st.write(f"**{len(docs_datajud)} documento(s) retornado(s) pelo DataJud**")
-                for d in docs_datajud:
-                    sigilo_label = f" [SIGILO {d['sigilo']}]" if d['sigilo'] else ""
-                    titulo = d['titulo'] or d['tipo'] or f"Documento {d['id']}"
-                    with st.expander(f"[{d['data']}] {titulo}{sigilo_label}"):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write("**ID**",          d["id"]         or "—")
-                            st.write("**Tipo**",        d["tipo"]       or "—")
-                            st.write("**Cod. Tipo**",   d["tipo_codigo"] or "—")
-                            st.write("**Titulo**",      d["titulo"]     or "—")
-                        with col2:
-                            st.write("**Data**",        d["data"]       or "—")
-                            st.write("**Autor**",       d["autor"]      or "—")
-                            st.write("**Polo**",        d["polo"]       or "—")
-                            st.write("**Paginas**",     d["paginas"]    or "—")
-                            st.write("**Hash**",        d["hash"]       or "—")
-                        if d["vinculados"]:
-                            st.write("**Documentos vinculados:**")
-                            for v in d["vinculados"]:
-                                st.write(f"- [{v['tipo']}] {v['titulo']} (id: {v['id']})")
-
-                # Exportar tabela
-                df_docs = pd.DataFrame([{
-                    "ID": d["id"], "Tipo": d["tipo"], "Titulo": d["titulo"],
-                    "Data": d["data"], "Autor": d["autor"], "Polo": d["polo"],
-                    "Paginas": d["paginas"], "Sigilo": d["sigilo"], "Hash": d["hash"],
-                } for d in docs_datajud])
-                st.download_button(
-                    "Exportar documentos CSV",
-                    data=df_docs.to_csv(index=False).encode("utf-8"),
-                    file_name=f"documentos_{numero.replace('.','').replace('-','')}.csv",
-                    mime="text/csv",
-                )
-
-        # ── Documentos via PJe autenticado ────────────────────────────────────
-        with tab_documentos:
-            tem_credencial = (cert_obj is not None) or (pje_usuario and pje_senha)
-
-            if not tem_credencial:
-                st.info(
-                    "Configure a autenticacao PJe na sidebar para acessar documentos.\n\n"
-                    "**Opcoes:** Certificado Digital A1 (.pfx/.p12) ou Usuario e Senha.\n\n"
-                    "Movimentacoes e partes ja estao disponiveis acima via DataJud (sem login)."
-                )
-            else:
-                info_tribunal = TRIBUNAIS.get(sigla)
-                if not info_tribunal:
-                    st.warning(f"URL do PJe para {sigla} nao mapeada.")
-                else:
-                    pje_url = info_tribunal[1]
-
-                    # Verifica se ja existe cliente autenticado (pos-OTP) para este tribunal
-                    pre_auth = st.session_state.pje_auth_cliente.get(sigla)
-                    if pre_auth:
-                        client     = pre_auth
-                        ok         = True
-                        modo_usado = "usuario e senha + OTP"
-                    else:
-                        client = PjeClient(pje_url)
-                        with st.spinner(f"Autenticando em {pje_url}..."):
-                            if cert_obj is not None:
-                                resultado_auth = client.autenticar_com_certificado(cert_obj.cert_tuple)
-                                modo_usado     = "certificado digital"
-                            else:
-                                resultado_auth = client.autenticar_com_senha(pje_usuario, pje_senha)
-                                modo_usado     = "usuario e senha"
-
-                        if resultado_auth == "otp_required":
-                            st.session_state.pje_otp_pending = True
-                            st.session_state.pje_client_otp  = client
-                            st.session_state.pje_otp_sigla   = sigla
-                            st.rerun()  # sai do bloco btn_buscar para exibir o campo OTP abaixo
+    # ── Partes ────────────────────────────────────────────────────────────────
+    with tab_partes:
+        if not partes:
+            st.info("Nenhuma parte encontrada.")
+        else:
+            for polo_label in ["ATIVO", "PASSIVO", "TERCEIRO", "TESTEMUNHA"]:
+                grupo = [p for p in partes if p["polo"].upper() == polo_label]
+                if not grupo:
+                    continue
+                st.subheader(polo_label)
+                for p in grupo:
+                    with st.expander(f"**{p['nome']}**" + (f"  —  {p['documento']}" if p['documento'] else "")):
+                        if p["advogados"]:
+                            st.write("**Advogados:**")
+                            for adv in p["advogados"]:
+                                oab = f" (OAB: {adv['oab']})" if adv["oab"] else ""
+                                st.write(f"- {adv['nome']}{oab}")
                         else:
-                            ok = bool(resultado_auth)
+                            st.write("Sem advogados cadastrados.")
+            outros = [p for p in partes if p["polo"].upper() not in ["ATIVO","PASSIVO","TERCEIRO","TESTEMUNHA"]]
+            for p in outros:
+                st.write(f"**{p['polo'].upper()}**: {p['nome']}")
 
-                    if not ok and not (st.session_state.pje_otp_pending and
-                                       st.session_state.pje_otp_sigla == sigla):
-                        st.error(f"Falha na autenticacao via {modo_usado}.")
-                        log = get_auth_log()
-                        if log:
-                            with st.expander("Detalhes do erro (log de autenticacao)", expanded=True):
-                                for linha in log:
-                                    if linha.startswith("  ⚠") or "MFA" in linha or "2o FATOR" in linha:
-                                        st.warning(linha)
-                                    elif linha.startswith("  ✓"):
+    # ── Movimentacoes ─────────────────────────────────────────────────────────
+    with tab_movimentos:
+        if not movs:
+            st.info("Nenhuma movimentacao encontrada.")
+        else:
+            st.write(f"**{len(movs)} movimentacao(oes) encontrada(s)**")
+            df_movs = pd.DataFrame(movs)
+            df_movs.columns = ["Data", "Codigo", "Nome", "Complemento"]
+            st.dataframe(df_movs[["Data", "Nome", "Complemento"]], use_container_width=True, height=400)
+            st.download_button(
+                "Exportar movimentacoes CSV",
+                data=df_movs.to_csv(index=False).encode("utf-8"),
+                file_name=f"movimentacoes_{_numero.replace('.','').replace('-','')}.csv",
+                mime="text/csv",
+            )
+
+    # ── Documentos DataJud ────────────────────────────────────────────────────
+    with tab_docs_datajud:
+        if not docs_datajud:
+            st.info(
+                "Este tribunal nao envia documentos via DataJud (API publica).\n\n"
+                "Use a aba **Documentos (PJe autenticado)** com certificado digital para acessar as pecas."
+            )
+        else:
+            st.write(f"**{len(docs_datajud)} documento(s) retornado(s) pelo DataJud**")
+            for d in docs_datajud:
+                sigilo_label = f" [SIGILO {d['sigilo']}]" if d['sigilo'] else ""
+                titulo = d['titulo'] or d['tipo'] or f"Documento {d['id']}"
+                with st.expander(f"[{d['data']}] {titulo}{sigilo_label}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**ID**",         d["id"]          or "—")
+                        st.write("**Tipo**",        d["tipo"]        or "—")
+                        st.write("**Cod. Tipo**",   d["tipo_codigo"] or "—")
+                        st.write("**Titulo**",      d["titulo"]      or "—")
+                    with col2:
+                        st.write("**Data**",        d["data"]        or "—")
+                        st.write("**Autor**",       d["autor"]       or "—")
+                        st.write("**Polo**",        d["polo"]        or "—")
+                        st.write("**Paginas**",     d["paginas"]     or "—")
+                        st.write("**Hash**",        d["hash"]        or "—")
+                    if d["vinculados"]:
+                        st.write("**Documentos vinculados:**")
+                        for v in d["vinculados"]:
+                            st.write(f"- [{v['tipo']}] {v['titulo']} (id: {v['id']})")
+            df_docs = pd.DataFrame([{
+                "ID": d["id"], "Tipo": d["tipo"], "Titulo": d["titulo"],
+                "Data": d["data"], "Autor": d["autor"], "Polo": d["polo"],
+                "Paginas": d["paginas"], "Sigilo": d["sigilo"], "Hash": d["hash"],
+            } for d in docs_datajud])
+            st.download_button(
+                "Exportar documentos CSV",
+                data=df_docs.to_csv(index=False).encode("utf-8"),
+                file_name=f"documentos_{_numero.replace('.','').replace('-','')}.csv",
+                mime="text/csv",
+            )
+
+    # ── Documentos via PJe autenticado ────────────────────────────────────────
+    with tab_documentos:
+        tem_credencial = (cert_obj is not None) or (pje_usuario and pje_senha)
+
+        if not tem_credencial:
+            st.info(
+                "Configure a autenticacao PJe na sidebar para acessar documentos.\n\n"
+                "**Opcoes:** Certificado Digital A1 (.pfx/.p12) ou Usuario e Senha.\n\n"
+                "Movimentacoes e partes ja estao disponiveis acima via DataJud (sem login)."
+            )
+        else:
+            info_tribunal = TRIBUNAIS.get(sigla)
+            if not info_tribunal:
+                st.warning(f"URL do PJe para {sigla} nao mapeada.")
+            else:
+                pje_url  = info_tribunal[1]
+                pre_auth = st.session_state.pje_auth_cliente.get(sigla)
+                otp_pend = (st.session_state.pje_otp_pending and
+                            st.session_state.pje_otp_sigla == sigla)
+
+                if pre_auth:
+                    # Sessao ja autenticada (pos-OTP ou direto)
+                    client     = pre_auth
+                    ok         = True
+                    modo_usado = "usuario e senha (autenticado)"
+                elif otp_pend:
+                    # OTP solicitado mas ainda nao confirmado — nao re-autentica
+                    st.warning("⚠ Segundo fator (OTP) exigido. Insira o codigo abaixo.")
+                    ok = False
+                else:
+                    client = PjeClient(pje_url)
+                    with st.spinner(f"Autenticando em {pje_url}..."):
+                        if cert_obj is not None:
+                            resultado_auth = client.autenticar_com_certificado(cert_obj.cert_tuple)
+                            modo_usado     = "certificado digital"
+                        else:
+                            resultado_auth = client.autenticar_com_senha(pje_usuario, pje_senha)
+                            modo_usado     = "usuario e senha"
+
+                    if resultado_auth == "otp_required":
+                        st.session_state.pje_otp_pending = True
+                        st.session_state.pje_client_otp  = client
+                        st.session_state.pje_otp_sigla   = sigla
+                        st.warning("⚠ Segundo fator (OTP) exigido. Insira o codigo abaixo.")
+                        ok = False
+                    else:
+                        ok = bool(resultado_auth)
+
+                if ok:
+                    st.success(f"Autenticado com sucesso via {modo_usado}.")
+                    with st.spinner("Buscando processo no PJe..."):
+                        proc_pje = client.buscar_processo(_numero)
+
+                    if not proc_pje:
+                        st.warning("Processo nao encontrado no PJe autenticado.")
+                        log_busca = get_auth_log()
+                        if log_busca:
+                            with st.expander("Log de tentativas de busca", expanded=True):
+                                for linha in log_busca:
+                                    if "✓" in linha:
                                         st.success(linha)
-                                    elif linha.startswith("  ✗") or "Falhou" in linha:
+                                    elif "✗" in linha or "Nao autorizado" in linha:
                                         st.error(linha)
+                                    elif "⚠" in linha:
+                                        st.warning(linha)
                                     else:
                                         st.code(linha, language=None)
-                    elif ok:
-                        st.success(f"Autenticado com sucesso via {modo_usado}.")
-                        with st.spinner("Buscando processo no PJe..."):
-                            proc_pje = client.buscar_processo(numero)
-
-                        if not proc_pje:
-                            st.warning("Processo nao encontrado no PJe autenticado.")
-                            log_busca = get_auth_log()
-                            if log_busca:
-                                with st.expander("Log de tentativas de busca", expanded=True):
-                                    for linha in log_busca:
-                                        if "✓" in linha:
-                                            st.success(linha)
-                                        elif "✗" in linha or "Nao autorizado" in linha:
-                                            st.error(linha)
-                                        elif "⚠" in linha:
-                                            st.warning(linha)
-                                        else:
-                                            st.code(linha, language=None)
+                    else:
+                        proc_id = proc_pje.get("id") or proc_pje.get("idProcesso")
+                        if not proc_id:
+                            st.warning("ID interno do processo nao retornado pelo PJe.")
                         else:
-                            proc_id = proc_pje.get("id") or proc_pje.get("idProcesso")
-                            if not proc_id:
-                                st.warning("ID interno do processo nao retornado pelo PJe.")
+                            with st.spinner("Buscando documentos..."):
+                                docs = client.listar_documentos(str(proc_id))
+                            if not docs:
+                                st.info("Nenhum documento encontrado ou acesso restrito ao polo.")
                             else:
-                                with st.spinner("Buscando documentos..."):
-                                    docs = client.listar_documentos(str(proc_id))
-
-                                if not docs:
-                                    st.info("Nenhum documento encontrado ou acesso restrito ao polo.")
+                                st.write(f"**{len(docs)} documento(s) encontrado(s)**")
+                                for d in docs:
+                                    with st.expander(
+                                        f"[{d['data'][:10] if d['data'] else ''}] "
+                                        f"{d['tipo']} — {d['nome']}"
+                                    ):
+                                        st.write(f"**Autor:** {d['autor'] or '—'}")
+                                        if d["url_pdf"]:
+                                            st.markdown(f"[Abrir PDF no PJe]({d['url_pdf']})")
+                elif not otp_pend:
+                    st.error(f"Falha na autenticacao via {modo_usado}.")
+                    log = get_auth_log()
+                    if log:
+                        with st.expander("Detalhes do erro (log de autenticacao)", expanded=True):
+                            for linha in log:
+                                if linha.startswith("  ⚠") or "MFA" in linha or "2o FATOR" in linha:
+                                    st.warning(linha)
+                                elif linha.startswith("  ✓"):
+                                    st.success(linha)
+                                elif linha.startswith("  ✗") or "Falhou" in linha:
+                                    st.error(linha)
                                 else:
-                                    st.write(f"**{len(docs)} documento(s) encontrado(s)**")
-                                    for d in docs:
-                                        with st.expander(
-                                            f"[{d['data'][:10] if d['data'] else ''}] "
-                                            f"{d['tipo']} — {d['nome']}"
-                                        ):
-                                            st.write(f"**Autor:** {d['autor'] or '—'}")
-                                            if d["url_pdf"]:
-                                                st.markdown(f"[Abrir PDF no PJe]({d['url_pdf']})")
+                                    st.code(linha, language=None)
 
-            # Cleanup arquivos PEM temporarios ao final
-            if cert_obj is not None:
-                try:
-                    cert_obj.cleanup()
-                except Exception:
-                    pass
+        if cert_obj is not None:
+            try:
+                cert_obj.cleanup()
+            except Exception:
+                pass
 
-        st.markdown("---")
+    st.markdown("---")
 
-# ── Segundo Fator (OTP) — exibido quando Keycloak exige MFA ──────────────────
+# ── Segundo Fator (OTP) — aparece abaixo dos resultados quando necessario ─────
 if st.session_state.pje_otp_pending:
     sigla_otp = st.session_state.pje_otp_sigla or "—"
     st.markdown("---")
     st.subheader(f"⚠ Autenticacao em Dois Fatores — {sigla_otp}")
     st.info(
         "O tribunal exige um segundo fator de autenticacao.\n\n"
-        "Abra o **Google Authenticator** (ou similar) no celular e insira o codigo de 6 digitos."
+        "Abra o **Google Authenticator** (ou similar) no celular e insira o codigo de 6 digitos abaixo."
     )
     col_otp_inp, col_otp_btn, col_otp_cancel = st.columns([3, 1, 1])
     with col_otp_inp:
@@ -490,7 +493,7 @@ if st.session_state.pje_otp_pending:
                     st.session_state.pje_auth_cliente[sigla_otp] = otp_client
                     st.session_state.pje_otp_pending = False
                     st.session_state.pje_client_otp  = None
-                    st.success("✓ Autenticado com sucesso! Clique em **Buscar** para carregar os documentos.")
+                    st.rerun()  # recarrega pagina — tab_documentos agora usa pre_auth
                 else:
                     log_otp = get_auth_log()
                     st.error("Codigo OTP invalido ou expirado. Tente novamente.")
