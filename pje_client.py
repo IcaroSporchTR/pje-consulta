@@ -589,16 +589,22 @@ class PjeClient:
                 if cnj_m:
                     cnj_partes = {
                         # Chaves = sufixo lowercase do name= JSF (fPP:numeroProcesso:<sufixo>)
-                        "sequencial":           cnj_m.group(1),  # 0329577
-                        "numerosequencial":     cnj_m.group(1),  # alias PJe 1.x TJMG
-                        "digitoverificador":    cnj_m.group(2),  # 75
-                        "anoinicio":            cnj_m.group(3),  # 2014
-                        "codigojustica":        cnj_m.group(4),  # 8
-                        "justica":              cnj_m.group(4),
-                        "codigotribunal":       cnj_m.group(5),  # 13
-                        "tribunal":             cnj_m.group(5),
-                        "codigoorigem":         cnj_m.group(6),  # 0145
-                        "origem":               cnj_m.group(6),
+                        # Mapeado dos campos REAIS observados no TJMG + aliases genericos
+                        "sequencial":                cnj_m.group(1),  # 0329577
+                        "numerosequencial":          cnj_m.group(1),  # PJe generrico
+                        "digitoverificador":         cnj_m.group(2),  # 75
+                        "numerodigitoverificador":   cnj_m.group(2),  # TJMG real
+                        "anoinicio":                 cnj_m.group(3),  # 2014
+                        "ano":                       cnj_m.group(3),  # TJMG real: fPP:numeroProcesso:Ano
+                        "codigojustica":             cnj_m.group(4),  # 8
+                        "justica":                   cnj_m.group(4),
+                        "ramojustica":               cnj_m.group(4),  # TJMG real: fPP:numeroProcesso:ramoJustica
+                        "codigotribunal":            cnj_m.group(5),  # 13
+                        "tribunal":                  cnj_m.group(5),
+                        "respectivotribunal":        cnj_m.group(5),  # TJMG real: fPP:numeroProcesso:respectivoTribunal
+                        "codigoorigem":              cnj_m.group(6),  # 0145
+                        "origem":                    cnj_m.group(6),
+                        "numeroorgaojustica":        cnj_m.group(6),  # TJMG real: fPP:numeroProcesso:NumeroOrgaoJustica
                     }
 
                 _last_auth_log.append(f"  [web] CNJ partes: {cnj_partes}")
