@@ -144,6 +144,48 @@ else:
         max_chars=8,
     )
 
+    # Botao de autenticacao antecipada (evita OTP expirado durante busca)
+    btn_conectar = st.sidebar.button("Conectar ao PJe", key="btn_conectar_pje", use_container_width=True)
+    if btn_conectar:
+        if not pje_usuario or not pje_senha:
+            st.sidebar.warning("Preencha usuario e senha.")
+        else:
+            # Descobre URL do tribunal para autenticacao antecipada.
+            # Usa TJMG como padrao quando nao ha processo buscado ainda.
+            _sigla_pre = (
+                st.session_state.get("pje_otp_sigla")
+                or (st.session_state.get("pje_resultados") or [None])[0] and
+                   (st.session_state.get("pje_resultados") or [(None,)])[0][0]
+                or "TJMG"
+            )
+            _info_pre = TRIBUNAIS.get(_sigla_pre)
+            if not _info_pre:
+                st.sidebar.error(f"Tribunal {_sigla_pre} nao mapeado.")
+            else:
+                with st.sidebar.status("Conectando ao PJe...", expanded=True) as _status:
+                    _client_pre = PjeClient(_info_pre[1])
+                    _res = _client_pre.autenticar_com_senha(pje_usuario, pje_senha, pje_otp)
+                    if _res is True:
+                        st.session_state.pje_auth_cliente[_sigla_pre] = _client_pre
+                        st.session_state.pje_otp_pending = False
+                        _status.update(label=f"Conectado ao {_sigla_pre}!", state="complete")
+                    elif _res == "otp_required":
+                        _status.update(label="OTP exigido — preencha o codigo acima e reconecte.", state="error")
+                        st.session_state.pje_otp_pending = True
+                        st.session_state.pje_otp_sigla   = _sigla_pre
+                        st.session_state.pje_client_otp  = _client_pre
+                    else:
+                        _status.update(label="Falha na autenticacao.", state="error")
+                        _log_pre = get_auth_log()
+                        if _log_pre:
+                            for _l in _log_pre[-6:]:
+                                st.sidebar.caption(_l)
+
+    # Indicador de conexao ativa
+    _conectados = list(st.session_state.get("pje_auth_cliente", {}).keys())
+    if _conectados:
+        st.sidebar.success(f"Conectado: {', '.join(_conectados)}")
+
 # ── Corpo principal ───────────────────────────────────────────────────────────
 st.title("⚖️ Consulta de Processos PJe")
 
