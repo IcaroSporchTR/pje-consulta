@@ -1,0 +1,14 @@
+{
+  "admin": {
+    "nome": "Administrador",
+    "hash": "$2b$12$kNBmJzorlHozhd9elQnpD.ChhPYpzHNElbeD1QKxV59YUfS.GLkXq",
+    "perfil": "admin",
+    "ativo": true
+  },
+  "teste": {
+    "nome": "Usuario Teste",
+    "hash": "$2b$12$BlfqMZhuBrlHkyWznkC.R.B9JoefJVJqSyOz2P5VhGNYWYUzskvTK",
+    "perfil": "usuario",
+    "ativo": true
+  }
+}
