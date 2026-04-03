@@ -452,7 +452,19 @@ if btn_buscar:
                             proc_pje = client.buscar_processo(numero)
 
                         if not proc_pje:
-                            st.warning("Processo nao encontrado no PJe autenticado (pode exigir acesso especifico ao polo).")
+                            st.warning("Processo nao encontrado no PJe autenticado.")
+                            log_busca = get_auth_log()
+                            if log_busca:
+                                with st.expander("Log de tentativas de busca", expanded=True):
+                                    for linha in log_busca:
+                                        if "✓" in linha:
+                                            st.success(linha)
+                                        elif "✗" in linha or "Nao autorizado" in linha:
+                                            st.error(linha)
+                                        elif "⚠" in linha:
+                                            st.warning(linha)
+                                        else:
+                                            st.code(linha, language=None)
                         else:
                             proc_id = proc_pje.get("id") or proc_pje.get("idProcesso")
                             if not proc_id:

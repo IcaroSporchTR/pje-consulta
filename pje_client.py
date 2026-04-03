@@ -33,7 +33,10 @@ AUTH_SENHA_PATHS = [
 ]
 PROCESS_PATHS = [
     "/pje/seam/resource/rest/processo/consultarByNumero/{numero}",
+    "/pje/api/v1/processo/{numero}",
+    "/pje/api/processo/{numero}",
     "/seam/resource/rest/processo/consultarByNumero/{numero}",
+    "/pje/seam/resource/rest/consultaPublica/processo/{numero}",
 ]
 DOCS_PATHS = [
     "/pje/seam/resource/rest/processo/{id}/documentos",
@@ -393,11 +396,40 @@ class PjeClient:
             return None
 
     def buscar_processo(self, numero: str) -> dict | None:
-        numero_limpo = re.sub(r"\D", "", numero)
-        for template in PROCESS_PATHS:
-            result = self._get(template.format(numero=numero_limpo))
-            if result:
-                return result
+        """
+        Tenta varios endpoints e formatos de numero.
+        Retorna o primeiro resultado encontrado ou None.
+        """
+        _last_auth_log.append("=== Busca de processo ===")
+        # Formatos a tentar: so digitos e formato CNJ com pontuacao
+        digitos = re.sub(r"\D", "", numero)
+        # Reconstroi formato CNJ se o numero tiver 20 digitos
+        if len(digitos) == 20:
+            cnj = f"{digitos[0:7]}-{digitos[7:9]}.{digitos[9:13]}.{digitos[13]}.{digitos[14:16]}.{digitos[16:20]}"
+        else:
+            cnj = numero.strip()
+
+        for fmt_label, fmt_numero in [("CNJ", cnj), ("digitos", digitos)]:
+            for template in PROCESS_PATHS:
+                url_path = template.format(numero=fmt_numero)
+                full_url = f"{self.base_url}{url_path}"
+                try:
+                    r = self.session.get(full_url, timeout=TIMEOUT, allow_redirects=True)
+                    _last_auth_log.append(f"  [processo/{fmt_label}] GET {url_path} → {r.status_code}")
+                    if r.status_code == 200:
+                        try:
+                            data = r.json()
+                            if data:
+                                _last_auth_log.append(f"  ✓ Encontrado via {url_path}")
+                                return data
+                        except Exception:
+                            pass
+                    elif r.status_code == 401:
+                        _last_auth_log.append("  ⚠ Nao autorizado (sessao pode ter expirado)")
+                except requests.RequestException as e:
+                    _last_auth_log.append(f"  ✗ Erro: {e}")
+
+        _last_auth_log.append("  ✗ Processo nao encontrado em nenhum endpoint")
         return None
 
     def listar_documentos(self, processo_id: str) -> list:
