@@ -578,29 +578,55 @@ class PjeClient:
                     _last_auth_log.append(f"  [web] ViewState NAO encontrado — pagina nao e JSF/Seam")
                     continue
 
-                # Todos os campos name= da pagina (para diagnostico)
+                # Todos os campos name= da pagina (sem limite — necessario para mapear CNJ)
                 all_names = re.findall(r'name="([^"]+)"', r.text)
-                _last_auth_log.append(f"  [web] Campos name= na pagina: {all_names[:20]}")
+                _last_auth_log.append(f"  [web] Campos fPP: {[n for n in all_names if 'fPP' in n]}")
 
-                # Campo de numero do processo — tenta por nome exato, depois por padrao
-                num_field_m = next(
-                    (n for n in all_names if any(
-                        x in n.lower() for x in ("numprocesso", "numeroprocesso", "nrprocesso", "numproc")
-                    )), None
-                )
-                _last_auth_log.append(
-                    f"  [web] Action: {action_url[:70]} | "
-                    f"Campo numero: {num_field_m or 'nao encontrado'}"
-                )
+                # ── Parseia CNJ em componentes ──────────────────────────────────
+                # Formato: NNNNNNN-DD.AAAA.J.TT.OOOO
+                cnj_m = re.match(r'(\d{7})-(\d{2})\.(\d{4})\.(\d)\.(\d{2})\.(\d{4})', cnj)
+                cnj_partes = {}
+                if cnj_m:
+                    cnj_partes = {
+                        # Chaves = sufixo lowercase do name= JSF (fPP:numeroProcesso:<sufixo>)
+                        "sequencial":           cnj_m.group(1),  # 0329577
+                        "numerosequencial":     cnj_m.group(1),  # alias PJe 1.x TJMG
+                        "digitoverificador":    cnj_m.group(2),  # 75
+                        "anoinicio":            cnj_m.group(3),  # 2014
+                        "codigojustica":        cnj_m.group(4),  # 8
+                        "justica":              cnj_m.group(4),
+                        "codigotribunal":       cnj_m.group(5),  # 13
+                        "tribunal":             cnj_m.group(5),
+                        "codigoorigem":         cnj_m.group(6),  # 0145
+                        "origem":               cnj_m.group(6),
+                    }
+
+                _last_auth_log.append(f"  [web] CNJ partes: {cnj_partes}")
+                _last_auth_log.append(f"  [web] Action: {action_url[:70]}")
 
                 form_data = {"javax.faces.ViewState": vs_m.group(1)}
-                if num_field_m:
-                    form_data[num_field_m] = cnj
-                else:
-                    form_data["fPP:numProcesso:numProcesso"] = cnj
-                    form_data["numeroProcesso"]              = cnj
 
-                # Botao de pesquisa — nome mais comum no PJe 1.x e depois regex
+                # Preenche cada subcomponente pelo sufixo do name (PJe 1.x padrao)
+                filled_any = False
+                for name in all_names:
+                    suffix = name.lower().rsplit(":", 1)[-1]  # ultimo segmento do id JSF
+                    if suffix in cnj_partes:
+                        form_data[name] = cnj_partes[suffix]
+                        filled_any = True
+                    # aliases menos comuns
+                    elif suffix in ("numprocesso", "numero", "numeroprocesso"):
+                        form_data[name] = cnj_partes.get("sequencial", cnj)
+                        filled_any = True
+
+                # Fallback se nenhum campo foi mapeado
+                if not filled_any:
+                    if cnj_partes:
+                        form_data["fPP:numeroProcesso:numeroSequencial"] = cnj_partes["sequencial"]
+                    else:
+                        form_data["fPP:numProcesso:numProcesso"] = cnj
+                        form_data["numeroProcesso"]              = cnj
+
+                # Botao de pesquisa
                 btn_name = next(
                     (n for n in all_names if any(
                         x in n.lower() for x in ("searchprocessos", "pesquisar", "buscar", "search")
@@ -608,6 +634,8 @@ class PjeClient:
                 )
                 if btn_name:
                     form_data[btn_name] = btn_name
+
+                _last_auth_log.append(f"  [web] form_data: {form_data}")
 
                 post_r = self.session.post(action_url, data=form_data,
                                            timeout=TIMEOUT, allow_redirects=True)
