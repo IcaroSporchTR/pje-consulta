@@ -99,6 +99,100 @@ class PjeClient:
 
         return False
 
+    def _autenticar_keycloak(self, usuario: str, senha: str, redirect_url: str) -> bool:
+        """
+        Autentica via Keycloak SSO (sso.cloud.pje.jus.br).
+        Extrai realm e client_id da URL de redirect capturada no login.
+        Tenta Resource Owner Password Credentials (ROPC) grant.
+        """
+        import re
+        # Extrai parametros do redirect: realm e client_id
+        realm_match     = re.search(r'/realms/([^/]+)/', redirect_url)
+        client_match    = re.search(r'client_id=([^&]+)', redirect_url)
+        redirect_match  = re.search(r'redirect_uri=([^&]+)', redirect_url)
+
+        if not realm_match or not client_match:
+            _log(f"  ✗ Nao foi possivel extrair realm/client_id da URL SSO")
+            return False
+
+        realm       = realm_match.group(1)
+        client_id   = requests.utils.unquote(client_match.group(1))
+        redirect_uri = requests.utils.unquote(redirect_match.group(1)) if redirect_match else ""
+
+        token_url = f"https://sso.cloud.pje.jus.br/auth/realms/{realm}/protocol/openid-connect/token"
+        _log(f"  [SSO/Keycloak] realm={realm} | client_id={client_id}")
+        _log(f"  Token URL: {token_url}")
+
+        # Tenta ROPC (Resource Owner Password Credentials)
+        payload = {
+            "grant_type": "password",
+            "client_id":  client_id,
+            "username":   usuario,
+            "password":   senha,
+            "scope":      "openid",
+        }
+        try:
+            r = requests.post(token_url, data=payload, timeout=TIMEOUT)
+            _log(f"  → Keycloak ROPC HTTP {r.status_code}")
+            _log(f"  → Resposta: {r.text[:300]}")
+
+            if r.ok:
+                data = r.json()
+                token = data.get("access_token")
+                if token:
+                    self._aplicar_token(token)
+                    _log("  ✓ Token Keycloak obtido com sucesso via ROPC")
+                    return True
+                _log("  ✗ Resposta OK mas sem access_token")
+            else:
+                err = r.json() if "application/json" in r.headers.get("Content-Type","") else {}
+                erro_msg = err.get("error_description") or err.get("error") or r.text[:200]
+                _log(f"  ✗ Keycloak recusou: {erro_msg}")
+                if "invalid_grant" in r.text:
+                    _log("  ✗ Credenciais invalidas (usuario ou senha errados)")
+                if "otp" in r.text.lower() or "totp" in r.text.lower():
+                    _log("  ⚠ KEYCLOAK EXIGE OTP/2FA — necessario segundo fator")
+        except Exception as e:
+            _log(f"  ✗ Erro ao contactar Keycloak: {e}")
+
+        # Fallback: tenta o fluxo Authorization Code via POST direto no Keycloak
+        try:
+            auth_url = f"https://sso.cloud.pje.jus.br/auth/realms/{realm}/protocol/openid-connect/auth"
+            _log(f"  [SSO] Tentando Authorization Code flow em {auth_url}")
+            # Busca pagina de login do Keycloak
+            get_r = self.session.get(
+                f"{auth_url}?response_type=code&client_id={client_id}"
+                f"&redirect_uri={requests.utils.quote(redirect_uri)}&scope=openid",
+                timeout=TIMEOUT
+            )
+            _log(f"  → GET login Keycloak: HTTP {get_r.status_code} | URL: {get_r.url[:100]}")
+            html = get_r.text
+            # Localiza action do formulario de login
+            action = re.search(r'action="([^"]+)"', html)
+            if action:
+                login_action = action.group(1).replace("&amp;", "&")
+                _log(f"  → Form action: {login_action[:100]}")
+                post_r = self.session.post(
+                    login_action,
+                    data={"username": usuario, "password": senha, "credentialId": ""},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=TIMEOUT, allow_redirects=True
+                )
+                _log(f"  → POST Keycloak form: HTTP {post_r.status_code} | URL final: {post_r.url[:100]}")
+                body_lower = post_r.text.lower()
+                if "otp" in body_lower or "totp" in body_lower or "verification" in body_lower:
+                    _log("  ⚠ SEGUNDO FATOR (OTP/TOTP) EXIGIDO PELO KEYCLOAK")
+                    _log(f"  Trecho: {post_r.text[max(0,post_r.text.lower().find('otp')-50):post_r.text.lower().find('otp')+200]}")
+                elif "pje.tjmg" in post_r.url or redirect_uri.split("/")[2] in post_r.url:
+                    _log("  ✓ Redirecionado de volta ao PJe — autenticacao bem sucedida")
+                    return True
+                else:
+                    _log(f"  ✗ Pos-login inesperado: {post_r.text[:300]}")
+        except Exception as e:
+            _log(f"  ✗ Erro no Authorization Code flow: {e}")
+
+        return False
+
     def autenticar_com_senha(self, usuario: str, senha: str) -> bool:
         """
         Autentica via usuario e senha.
@@ -145,7 +239,7 @@ class PjeClient:
             url = f"{self.base_url}{path}"
             try:
                 _log(f"[FORM] GET {url}")
-                get_r = self.session.get(url, timeout=TIMEOUT)
+                get_r = self.session.get(url, timeout=TIMEOUT, allow_redirects=True)
                 _log(f"  → HTTP {get_r.status_code} | URL final: {get_r.url}")
                 if not get_r.ok:
                     _log(f"  ✗ Nao foi possivel carregar o formulario")
@@ -156,6 +250,13 @@ class PjeClient:
                 viewstate = re.search(r'name="javax\.faces\.ViewState"[^>]*value="([^"]+)"', html)
                 form_id   = re.search(r'<form[^>]*id="([^"]*login[^"]*)"', html, re.I)
                 mfa_hint  = re.search(r'(token|otp|segundo.fator|autenticacao.dupla|two.factor|captcha|recaptcha)', html, re.I)
+
+                # Detecta redirecionamento para Keycloak SSO
+                if "sso.cloud.pje.jus.br" in get_r.url:
+                    _log(f"  → Detectado Keycloak SSO — usando fluxo OAuth")
+                    if self._autenticar_keycloak(usuario, senha, get_r.url):
+                        return True
+                    continue
 
                 _log(f"  ViewState encontrado: {'sim' if viewstate else 'nao'}")
                 _log(f"  Form ID: {form_id.group(1) if form_id else 'nao encontrado'}")
