@@ -173,7 +173,9 @@ else:
                     _log_pre = get_auth_log()
                     if _res is True:
                         st.session_state.pje_auth_cliente[_sigla_pre] = _client_pre
-                        st.session_state.pje_otp_pending = False
+                        st.session_state.pje_otp_pending  = False
+                        st.session_state.pje_resultados   = []
+                        st.session_state.pje_numero_buscado = ""
                         _status.update(label=f"Conectado ao {_sigla_pre}!", state="complete")
                         st.rerun()
                     elif _res == "otp_required":
@@ -509,53 +511,6 @@ for sigla, doc in _resultados:
                 pass
 
     st.markdown("---")
-
-# ── Segundo Fator (OTP) — aparece abaixo dos resultados quando necessario ─────
-if st.session_state.pje_otp_pending:
-    sigla_otp = st.session_state.pje_otp_sigla or "—"
-    st.markdown("---")
-    st.subheader(f"⚠ Autenticacao em Dois Fatores — {sigla_otp}")
-    st.info(
-        "O tribunal exige um segundo fator de autenticacao.\n\n"
-        "Abra o **Google Authenticator** (ou similar) no celular e insira o codigo de 6 digitos abaixo."
-    )
-    col_otp_inp, col_otp_btn, col_otp_cancel = st.columns([3, 1, 1])
-    with col_otp_inp:
-        otp_code = st.text_input(
-            "Codigo do autenticador",
-            placeholder="000000",
-            max_chars=8,
-            key="main_otp_code",
-            label_visibility="collapsed",
-        )
-    with col_otp_btn:
-        btn_otp_confirm = st.button("Confirmar", type="primary", key="btn_otp_confirm", use_container_width=True)
-    with col_otp_cancel:
-        if st.button("Cancelar", key="btn_otp_cancel", use_container_width=True):
-            st.session_state.pje_otp_pending = False
-            st.session_state.pje_client_otp  = None
-            st.rerun()
-
-    if btn_otp_confirm:
-        if not otp_code:
-            st.warning("Informe o codigo OTP.")
-        else:
-            otp_client = st.session_state.pje_client_otp
-            if otp_client:
-                with st.spinner("Verificando codigo..."):
-                    ok_otp = otp_client._autenticar_keycloak_com_otp(otp_code)
-                if ok_otp:
-                    st.session_state.pje_auth_cliente[sigla_otp] = otp_client
-                    st.session_state.pje_otp_pending = False
-                    st.session_state.pje_client_otp  = None
-                    st.rerun()  # recarrega pagina — tab_documentos agora usa pre_auth
-                else:
-                    log_otp = get_auth_log()
-                    st.error("Codigo OTP invalido ou expirado. Tente novamente.")
-                    if log_otp:
-                        with st.expander("Detalhes", expanded=False):
-                            for linha in log_otp[-5:]:
-                                st.code(linha, language=None)
 
 # ── Painel Admin (so para perfil admin) ──────────────────────────────────────
 if usuario_atual["perfil"] == "admin":

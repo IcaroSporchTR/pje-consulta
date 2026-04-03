@@ -225,16 +225,11 @@ class PjeClient:
             )
             _log(f"  → HTTP {post_r.status_code} | URL: {post_r.url[:100]}")
 
-            # Verifica se voltou ao PJe com sucesso
-            pje_host = self.base_url.split("//")[-1].split("/")[0]
-            if pje_host in post_r.url and "sso.cloud" not in post_r.url:
-                if post_r.status_code in (200, 302):
-                    _log("  ✓ Redirecionado ao PJe — sessao estabelecida")
-                    return True
-
             body_lower = post_r.text.lower()
             otp_match  = re.search(r'action="([^"]+)"', post_r.text)
+            pje_host   = self.base_url.split("//")[-1].split("/")[0]
 
+            # OTP exigido (ainda no SSO)
             if any(x in body_lower for x in ("otp", "totp", "verification", "segundo fator", "authenticator")):
                 _log("  ⚠ SEGUNDO FATOR (OTP) EXIGIDO")
                 if otp_match:
@@ -244,7 +239,23 @@ class PjeClient:
                     return self._autenticar_keycloak_com_otp(otp)
                 return "otp_required"
 
-            _log(f"  ✗ Resposta inesperada apos login: {post_r.text[:200]}")
+            # Redirecionado de volta ao PJe (qualquer status — PJe retorna 400 no callback normalmente)
+            if pje_host in post_r.url and "sso.cloud" not in post_r.url:
+                _log(f"  → Redirecionado ao PJe (HTTP {post_r.status_code}) — verificando sessao")
+                test = self.session.get(
+                    f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
+                    timeout=TIMEOUT, allow_redirects=False,
+                )
+                loc = test.headers.get("Location", "")
+                _log(f"  → Sessao: HTTP {test.status_code} | Location: {loc[:80]}")
+                if test.status_code == 200 or (test.status_code == 302
+                        and "login" not in loc.lower() and "sso.cloud" not in loc):
+                    _log("  ✓ Sessao PJe ativa")
+                    return True
+                _log("  ✗ Sessao invalida — redireciona para login")
+                return False
+
+            _log(f"  ✗ Resposta inesperada: URL={post_r.url[:80]} | body={post_r.text[:150]}")
         except Exception as e:
             _log(f"  ✗ Erro no Authorization Code flow: {e}")
 
