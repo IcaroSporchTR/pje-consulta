@@ -5,6 +5,7 @@ Suporta autenticacao via:
   - Usuario e senha (fallback)
 """
 
+import json
 import re
 import requests
 
@@ -179,6 +180,7 @@ class PjeClient:
 
         realm     = realm_match.group(1)
         client_id = requests.utils.unquote(client_match.group(1))
+        self._pje_legacy_app = client_id  # usado como X-pje-legacy-app nas chamadas REST
         _log(f"  [SSO/Keycloak] realm={realm} | client_id={client_id}")
 
         # Tenta ROPC primeiro (mais simples, falha se exigir client_secret)
@@ -435,10 +437,78 @@ class PjeClient:
         except Exception:
             return None
 
+    def _buscar_via_pje_legacy_api(self, cnj: str) -> dict | None:
+        """
+        API documentada em docs.pje.jus.br/manuais-basicos/padroes-de-api-do-pje/
+        Endpoint: /seam/resource/rest/pje-legacy/api/v1/processos
+        Filtro:   ?filter={"numero":{"eq":"<CNJ>"}}
+        Auth:     cookie jsessionid (ja na sessao) + header X-pje-legacy-app
+        """
+        app_header = getattr(self, "_pje_legacy_app", "")
+        extra_headers = {"X-pje-legacy-app": app_header} if app_header else {}
+
+        base_paths = [
+            "/seam/resource/rest/pje-legacy/api/v1/processos",
+            "/pje/seam/resource/rest/pje-legacy/api/v1/processos",
+        ]
+        filter_val = json.dumps({"numero": {"eq": cnj}})
+
+        for base in base_paths:
+            url = f"{self.base_url}{base}"
+            try:
+                r = self.session.get(
+                    url,
+                    params={"filter": filter_val},
+                    headers={**self.session.headers, **extra_headers},
+                    timeout=TIMEOUT,
+                    allow_redirects=True,
+                )
+                _last_auth_log.append(
+                    f"  [pje-legacy] GET {base}?filter=... → {r.status_code}"
+                )
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                        result = data.get("result", data)
+                        if isinstance(result, list) and result:
+                            _last_auth_log.append("  ✓ Encontrado via pje-legacy API!")
+                            return result[0]
+                        if isinstance(result, dict) and result.get("id"):
+                            _last_auth_log.append("  ✓ Encontrado via pje-legacy API!")
+                            return result
+                    except Exception as e:
+                        _last_auth_log.append(f"  ✗ JSON parse: {e}")
+                elif r.status_code not in (404, 403):
+                    _last_auth_log.append(f"  Resposta: {r.text[:200]}")
+            except requests.RequestException as e:
+                _last_auth_log.append(f"  ✗ {e}")
+
+        # Tenta tambem via Gateway central (requer Bearer, pode nao funcionar sem token)
+        gw_url = "https://gateway.cloud.pje.jus.br/pje-legacy/api/v1/processos"
+        try:
+            r = self.session.get(
+                gw_url,
+                params={"filter": filter_val},
+                headers={**self.session.headers, **extra_headers},
+                timeout=TIMEOUT,
+            )
+            _last_auth_log.append(f"  [gateway] GET pje-legacy/api/v1/processos → {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                result = data.get("result", data)
+                if isinstance(result, list) and result:
+                    _last_auth_log.append("  ✓ Encontrado via Gateway!")
+                    return result[0]
+        except Exception as e:
+            _last_auth_log.append(f"  ✗ Gateway: {e}")
+
+        return None
+
     def buscar_processo(self, numero: str) -> dict | None:
         """
-        1. Tenta endpoints REST (PJe 1.x e 2.x)
-        2. Fallback: scraping da interface web do PJe
+        1. API pje-legacy (endpoints documentados em docs.pje.jus.br)
+        2. Endpoints REST legados (fallback)
+        3. Scraping da interface web
         """
         _last_auth_log.append("=== Busca de processo ===")
         digitos = re.sub(r"\D", "", numero)
@@ -447,7 +517,13 @@ class PjeClient:
         else:
             cnj = numero.strip()
 
-        # 1. Tenta REST
+        # 1. API pje-legacy (documentacao oficial)
+        _last_auth_log.append("  → API pje-legacy (docs.pje.jus.br)...")
+        result = self._buscar_via_pje_legacy_api(cnj)
+        if result:
+            return result
+
+        # 2. Endpoints REST legados (PJe 1.x / 2.x)
         for fmt_label, fmt_numero in [("CNJ", cnj), ("digitos", digitos)]:
             for template in PROCESS_PATHS:
                 url_path = template.format(numero=fmt_numero)
@@ -458,14 +534,14 @@ class PjeClient:
                         try:
                             data = r.json()
                             if data:
-                                _last_auth_log.append("  ✓ Encontrado via REST!")
+                                _last_auth_log.append("  ✓ Encontrado via REST legado!")
                                 return data
                         except Exception:
                             pass
                 except requests.RequestException as e:
                     _last_auth_log.append(f"  ✗ {e}")
 
-        # 2. Fallback: scraping web
+        # 3. Fallback: scraping web
         _last_auth_log.append("  → REST indisponivel; tentando interface web...")
         return self._buscar_processo_web(cnj, digitos)
 
