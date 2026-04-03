@@ -723,51 +723,77 @@ class PjeClient:
 
                 _last_auth_log.append(f"  [web] form_data: {form_data}")
 
+                # ── POST regular ───────────────────────────────────────────────
                 post_r = self.session.post(action_url, data=form_data,
                                            timeout=TIMEOUT, allow_redirects=True)
                 _last_auth_log.append(
                     f"  [web] POST → {post_r.status_code} | URL: {post_r.url[:100]} ({len(post_r.text)} bytes)"
                 )
-                # Diagnostico da resposta
-                _last_auth_log.append(f"  [web] RESP[0:400]: {post_r.text[:400]!r}")
 
                 if post_r.status_code not in (200, 302):
                     continue
 
-                # Verifica se o ID do processo esta na URL apos redirect
-                url_id_m = re.search(r'[?&]idProcesso=(\d+)', post_r.url)
-                if url_id_m:
-                    pid = url_id_m.group(1)
-                    _last_auth_log.append(f"  ✓ ID do processo na URL apos redirect: {pid}")
-                    return {"id": pid, "idProcesso": pid, "numero": cnj,
-                            "_fonte": "web", "_url": post_r.url}
-
-                # Procura links com idProcesso no HTML da resposta
-                link_m = re.search(
-                    r'href="([^"]*idProcesso=(\d+)[^"]*)"',
-                    post_r.text, re.I
+                # ── POST AJAX RichFaces (fallback quando o botao e a4j:commandButton) ──
+                # Em PJe 1.x o botao fPP:searchProcessos pode ser AJAX-only;
+                # enviamos AJAXREQUEST para receber a resposta XML de atualizacao parcial.
+                ajax_data = dict(form_data)
+                form_elem = next((n for n in all_names
+                                  if re.match(r'^j_id\d+$', n)), "j_id28")
+                ajax_data["AJAXREQUEST"] = form_elem
+                ajax_r = self.session.post(
+                    action_url, data=ajax_data,
+                    headers={**self.session.headers,
+                             "Faces-Request": "partial/ajax",
+                             "X-Requested-With": "XMLHttpRequest"},
+                    timeout=TIMEOUT, allow_redirects=True,
                 )
-                if link_m:
-                    pid  = link_m.group(2)
-                    href = link_m.group(1).replace("&amp;", "&")
-                    url_proc = href if href.startswith("http") else f"{self.base_url}{href}"
-                    _last_auth_log.append(f"  ✓ ID do processo em link HTML: {pid}")
-                    return {"id": pid, "idProcesso": pid, "numero": cnj,
-                            "_fonte": "web", "_url": url_proc}
+                _last_auth_log.append(
+                    f"  [web] AJAX POST → {ajax_r.status_code} ({len(ajax_r.text)} bytes)"
+                )
+                _last_auth_log.append(f"  [web] AJAX RESP[0:600]: {ajax_r.text[:600]!r}")
 
-                # Procura idProcesso= em qualquer lugar no HTML
-                pid_m = re.search(r'idProcesso[="\s:]+(\d+)', post_r.text, re.I)
-                if pid_m:
-                    pid = pid_m.group(1)
-                    _last_auth_log.append(f"  ✓ ID do processo no HTML: {pid}")
-                    return {"id": pid, "idProcesso": pid, "numero": cnj, "_fonte": "web"}
+                # Combina as duas respostas para extrair o ID
+                textos = [post_r.text, ajax_r.text if ajax_r.status_code == 200 else ""]
 
-                # Numero CNJ aparece no resultado mesmo sem ID explicito
-                if cnj[:7] in post_r.text or digitos[:7] in post_r.text:
-                    _last_auth_log.append("  ✓ Processo localizado na pagina web (sem ID)")
-                    return {"numero": cnj, "_fonte": "web", "_html": post_r.text}
+                def _extrair_pid(html: str) -> str | None:
+                    """Extrai idProcesso de qualquer formato: URL, href, JSON, JS onclick."""
+                    # URL do redirect
+                    m = re.search(r'[?&;]idProcesso=(\d+)', html, re.I)
+                    if m: return m.group(1)
+                    # Qualquer ocorrencia de idProcesso seguida de digitos
+                    # Cobre: =123, :123, ','123', "123", [123]
+                    m = re.search(r'idProcesso[^A-Za-z0-9_\-]{1,5}(\d{4,})', html, re.I)
+                    if m: return m.group(1)
+                    return None
 
-                _last_auth_log.append("  ⚠ Pagina carregou mas processo nao encontrado no HTML")
+                for texto in textos:
+                    # Verifica URL do POST/AJAX
+                    url_pid = _extrair_pid(post_r.url) or _extrair_pid(ajax_r.url if ajax_r.status_code == 200 else "")
+                    if url_pid:
+                        _last_auth_log.append(f"  ✓ ID na URL redirect: {url_pid}")
+                        return {"id": url_pid, "idProcesso": url_pid, "numero": cnj,
+                                "_fonte": "web", "_url": post_r.url}
+
+                    pid = _extrair_pid(texto)
+                    if pid:
+                        _last_auth_log.append(f"  ✓ ID do processo extraido: {pid}")
+                        return {"id": pid, "idProcesso": pid, "numero": cnj, "_fonte": "web"}
+
+                    # Processo aparece pelo numero mas sem ID visivel (AJAX diferido)
+                    seq = cnj_partes.get("sequencial", cnj[:7])
+                    if seq in texto:
+                        # Loga contexto ao redor do numero para diagnostico
+                        pos = texto.find(seq)
+                        trecho = texto[max(0, pos-150):pos+300]
+                        _last_auth_log.append(f"  [web] Numero encontrado, contexto: {trecho!r}")
+                        # Tenta extrair ID do contexto proximo
+                        pid2 = _extrair_pid(trecho)
+                        if pid2:
+                            _last_auth_log.append(f"  ✓ ID no contexto do numero: {pid2}")
+                            return {"id": pid2, "idProcesso": pid2, "numero": cnj, "_fonte": "web"}
+                        return {"numero": cnj, "_fonte": "web", "_html": texto}
+
+                _last_auth_log.append("  ⚠ Processo nao encontrado nas respostas POST e AJAX")
 
             except Exception as e:
                 _last_auth_log.append(f"  ✗ Erro web {path}: {e}")
