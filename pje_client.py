@@ -302,8 +302,11 @@ class PjeClient:
                 # Detecta redirecionamento para Keycloak SSO
                 if "sso.cloud.pje.jus.br" in get_r.url:
                     _log(f"  → Detectado Keycloak SSO — usando fluxo OAuth")
-                    if self._autenticar_keycloak(usuario, senha, get_r.url):
+                    resultado_kc = self._autenticar_keycloak(usuario, senha, get_r.url)
+                    if resultado_kc is True:
                         return True
+                    if resultado_kc == "otp_required":
+                        return "otp_required"  # propaga sinal para o frontend
                     continue
 
                 _log(f"  ViewState encontrado: {'sim' if viewstate else 'nao'}")
