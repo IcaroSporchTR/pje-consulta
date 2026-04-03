@@ -99,6 +99,45 @@ class PjeClient:
 
         return False
 
+    def _autenticar_keycloak_com_otp(self, otp: str) -> bool:
+        """
+        Etapa 2: envia o OTP para o Keycloak usando a sessao salva da etapa 1.
+        Requer que _keycloak_otp_action esteja definido na instancia.
+        """
+        action = getattr(self, "_keycloak_otp_action", None)
+        if not action:
+            _log("  ✗ Sem sessao Keycloak pendente para OTP")
+            return False
+        try:
+            _log(f"[OTP] POST {action[:80]}")
+            r = self.session.post(
+                action,
+                data={"otp": otp, "selectedCredentialId": ""},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=TIMEOUT, allow_redirects=True
+            )
+            _log(f"  → HTTP {r.status_code} | URL final: {r.url[:100]}")
+            body = r.text.lower()
+            if any(x in body for x in ["otp inv", "codigo inv", "invalid", "incorrect", "expirou", "expired"]):
+                _log("  ✗ OTP invalido ou expirado")
+                return False
+            # Verifica se voltou ao PJe (autenticado)
+            if "pje." in r.url and "sso.cloud" not in r.url:
+                _log("  ✓ OTP aceito — redirecionado ao PJe")
+                return True
+            # Tenta acessar area restrita para confirmar sessao
+            test = self.session.get(
+                f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
+                timeout=TIMEOUT, allow_redirects=False
+            )
+            if test.status_code in (200, 302) and "login" not in test.headers.get("Location","").lower():
+                _log("  ✓ Sessao valida apos OTP")
+                return True
+            _log(f"  ✗ Sessao invalida apos OTP: {test.status_code}")
+        except Exception as e:
+            _log(f"  ✗ Erro ao enviar OTP: {e}")
+        return False
+
     def _autenticar_keycloak(self, usuario: str, senha: str, redirect_url: str) -> bool:
         """
         Autentica via Keycloak SSO (sso.cloud.pje.jus.br).
@@ -180,10 +219,16 @@ class PjeClient:
                 )
                 _log(f"  → POST Keycloak form: HTTP {post_r.status_code} | URL final: {post_r.url[:100]}")
                 body_lower = post_r.text.lower()
-                if "otp" in body_lower or "totp" in body_lower or "verification" in body_lower:
-                    _log("  ⚠ SEGUNDO FATOR (OTP/TOTP) EXIGIDO PELO KEYCLOAK")
-                    _log(f"  Trecho: {post_r.text[max(0,post_r.text.lower().find('otp')-50):post_r.text.lower().find('otp')+200]}")
-                elif "pje.tjmg" in post_r.url or redirect_uri.split("/")[2] in post_r.url:
+                otp_action = re.search(r'action="([^"]+)"', post_r.text)
+                if ("otp" in body_lower or "totp" in body_lower or "verification" in body_lower
+                        or "segundo fator" in body_lower or "authenticator" in body_lower):
+                    _log("  ⚠ SEGUNDO FATOR (OTP) EXIGIDO — aguardando codigo")
+                    # Salva action para etapa 2
+                    if otp_action:
+                        self._keycloak_otp_action = otp_action.group(1).replace("&amp;", "&")
+                        _log(f"  OTP action salva: {self._keycloak_otp_action[:80]}")
+                    return "otp_required"  # sinal especial para o frontend
+                elif "pje.tjmg" in post_r.url or (redirect_uri and redirect_uri.split("/")[2] in post_r.url):
                     _log("  ✓ Redirecionado de volta ao PJe — autenticacao bem sucedida")
                     return True
                 else:

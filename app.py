@@ -41,6 +41,14 @@ st.markdown("""
 # ── Tela de Login ─────────────────────────────────────────────────────────────
 if "usuario_logado" not in st.session_state:
     st.session_state.usuario_logado = None
+if "pje_otp_pending" not in st.session_state:
+    st.session_state.pje_otp_pending = False
+if "pje_client_otp" not in st.session_state:
+    st.session_state.pje_client_otp = None
+if "pje_otp_sigla" not in st.session_state:
+    st.session_state.pje_otp_sigla = None
+if "pje_auth_cliente" not in st.session_state:
+    st.session_state.pje_auth_cliente = {}  # sigla -> PjeClient autenticado
 
 if not st.session_state.usuario_logado:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
@@ -128,6 +136,43 @@ if auth_modo == "Certificado Digital (A1)":
 else:
     pje_usuario = st.sidebar.text_input("Usuario PJe (CPF, so numeros)")
     pje_senha   = st.sidebar.text_input("Senha PJe", type="password")
+
+# ── OTP / Segundo Fator ───────────────────────────────────────────────────────
+if st.session_state.pje_otp_pending:
+    st.sidebar.markdown("---")
+    st.sidebar.warning("⚠ Segundo fator (OTP) exigido")
+    sigla_otp_label = st.session_state.pje_otp_sigla or "—"
+    st.sidebar.caption(f"Tribunal: **{sigla_otp_label}**")
+    otp_val = st.sidebar.text_input(
+        "Codigo do autenticador (Google Authenticator / similar)",
+        key="sidebar_otp_val",
+        placeholder="000000",
+    )
+    btn_otp = st.sidebar.button("Confirmar OTP", type="primary", key="btn_confirmar_otp", use_container_width=True)
+    if st.sidebar.button("Cancelar", key="btn_cancelar_otp"):
+        st.session_state.pje_otp_pending = False
+        st.session_state.pje_client_otp  = None
+        st.rerun()
+    if btn_otp:
+        if not otp_val:
+            st.sidebar.warning("Informe o codigo OTP.")
+        else:
+            otp_client = st.session_state.pje_client_otp
+            if otp_client:
+                with st.spinner("Verificando OTP..."):
+                    ok_otp = otp_client._autenticar_keycloak_com_otp(otp_val)
+                if ok_otp:
+                    st.session_state.pje_auth_cliente[st.session_state.pje_otp_sigla] = otp_client
+                    st.session_state.pje_otp_pending = False
+                    st.session_state.pje_client_otp  = None
+                    st.sidebar.success("✓ Autenticado! Clique em Buscar para carregar os documentos.")
+                else:
+                    log_otp = get_auth_log()
+                    st.sidebar.error("OTP invalido ou expirado.")
+                    if log_otp:
+                        with st.sidebar.expander("Detalhes", expanded=False):
+                            for l in log_otp[-5:]:
+                                st.caption(l)
 
 # ── Corpo principal ───────────────────────────────────────────────────────────
 st.title("⚖️ Consulta de Processos PJe")
@@ -355,17 +400,39 @@ if btn_buscar:
                     st.warning(f"URL do PJe para {sigla} nao mapeada.")
                 else:
                     pje_url = info_tribunal[1]
-                    client = PjeClient(pje_url)
 
-                    with st.spinner(f"Autenticando em {pje_url}..."):
-                        if cert_obj is not None:
-                            ok = client.autenticar_com_certificado(cert_obj.cert_tuple)
-                            modo_usado = "certificado digital"
+                    # Verifica se ja existe cliente autenticado (pos-OTP) para este tribunal
+                    pre_auth = st.session_state.pje_auth_cliente.get(sigla)
+                    if pre_auth:
+                        client     = pre_auth
+                        ok         = True
+                        modo_usado = "usuario e senha + OTP"
+                    else:
+                        client = PjeClient(pje_url)
+                        with st.spinner(f"Autenticando em {pje_url}..."):
+                            if cert_obj is not None:
+                                resultado_auth = client.autenticar_com_certificado(cert_obj.cert_tuple)
+                                modo_usado     = "certificado digital"
+                            else:
+                                resultado_auth = client.autenticar_com_senha(pje_usuario, pje_senha)
+                                modo_usado     = "usuario e senha"
+
+                        if resultado_auth == "otp_required":
+                            st.session_state.pje_otp_pending = True
+                            st.session_state.pje_client_otp  = client
+                            st.session_state.pje_otp_sigla   = sigla
+                            st.warning("⚠ Segundo fator (OTP) exigido pelo tribunal.")
+                            st.info(
+                                "Insira o codigo do autenticador (Google Authenticator ou similar) "
+                                "na **barra lateral** e clique em **Confirmar OTP**. "
+                                "Depois clique em **Buscar** novamente para carregar os documentos."
+                            )
+                            ok = False
                         else:
-                            ok = client.autenticar_com_senha(pje_usuario, pje_senha)
-                            modo_usado = "usuario e senha"
+                            ok = bool(resultado_auth)
 
-                    if not ok:
+                    if not ok and not (st.session_state.pje_otp_pending and
+                                       st.session_state.pje_otp_sigla == sigla):
                         st.error(f"Falha na autenticacao via {modo_usado}.")
                         log = get_auth_log()
                         if log:
@@ -379,7 +446,7 @@ if btn_buscar:
                                         st.error(linha)
                                     else:
                                         st.code(linha, language=None)
-                    else:
+                    elif ok:
                         st.success(f"Autenticado com sucesso via {modo_usado}.")
                         with st.spinner("Buscando processo no PJe..."):
                             proc_pje = client.buscar_processo(numero)
