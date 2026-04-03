@@ -18,7 +18,7 @@ from datajud_client import (
     extrair_movimentos,
     extrair_documentos,
 )
-from pje_client import PjeClient
+from pje_client import PjeClient, get_auth_log
 from cert_utils import CertificadoA1
 from usuarios import autenticar, criar_usuario, alterar_senha, remover_usuario, listar_usuarios
 
@@ -149,7 +149,7 @@ with col2:
     )
 
 with col3:
-    buscar_todos = st.checkbox("Buscar em todos", value=False, help="Pesquisa em todos os tribunais (mais lento)")
+    buscar_todos = st.checkbox("Buscar em todos", value=True, help="Pesquisa em todos os tribunais (mais lento)")
 
 btn_buscar = st.button("Buscar", type="primary", use_container_width=True)
 
@@ -366,10 +366,19 @@ if btn_buscar:
                             modo_usado = "usuario e senha"
 
                     if not ok:
-                        st.error(
-                            f"Falha na autenticacao via {modo_usado}.\n\n"
-                            "Verifique as credenciais ou se o tribunal suporta autenticacao via API REST."
-                        )
+                        st.error(f"Falha na autenticacao via {modo_usado}.")
+                        log = get_auth_log()
+                        if log:
+                            with st.expander("Detalhes do erro (log de autenticacao)", expanded=True):
+                                for linha in log:
+                                    if linha.startswith("  ⚠") or "MFA" in linha or "2o FATOR" in linha:
+                                        st.warning(linha)
+                                    elif linha.startswith("  ✓"):
+                                        st.success(linha)
+                                    elif linha.startswith("  ✗") or "Falhou" in linha:
+                                        st.error(linha)
+                                    else:
+                                        st.code(linha, language=None)
                     else:
                         st.success(f"Autenticado com sucesso via {modo_usado}.")
                         with st.spinner("Buscando processo no PJe..."):

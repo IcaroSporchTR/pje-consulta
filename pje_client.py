@@ -10,6 +10,18 @@ import requests
 
 TIMEOUT = 30
 
+# Log de tentativas para exibir no frontend
+_last_auth_log = []
+
+
+def get_auth_log() -> list:
+    return list(_last_auth_log)
+
+
+def _log(msg: str):
+    _last_auth_log.append(msg)
+
+
 AUTH_CERT_PATHS = [
     "/pje/seam/resource/rest/usuario/autenticarComCertificado",
     "/pje/seam/resource/rest/autenticacao/certificado",
@@ -91,24 +103,37 @@ class PjeClient:
         """
         Autentica via usuario e senha.
         Tenta REST JSON primeiro, depois form POST (Seam/JSF).
+        Registra log detalhado em _last_auth_log.
         """
+        _last_auth_log.clear()
+        _log(f"Iniciando autenticacao para usuario: {usuario[:3]}***")
+        _log(f"URL base do tribunal: {self.base_url}")
+
         # 1. Tenta endpoints REST JSON
         payload_json = {"username": usuario, "password": senha, "token": ""}
         for path in AUTH_SENHA_PATHS:
             url = f"{self.base_url}{path}"
             try:
+                _log(f"[REST] POST {url}")
                 r = self.session.post(
                     url, json=payload_json,
                     headers={**self.session.headers, "Content-Type": "application/json"},
                     timeout=TIMEOUT,
                 )
+                _log(f"  → HTTP {r.status_code} | Content-Type: {r.headers.get('Content-Type','')[:60]}")
+                _log(f"  → Resposta: {r.text[:200]}")
                 if r.ok:
                     token = self._extrair_token(r)
                     if token:
                         self._aplicar_token(token)
+                        _log("  ✓ Token JWT obtido com sucesso")
                         return True
-            except requests.RequestException:
-                continue
+                    else:
+                        _log("  ✗ HTTP OK mas sem token na resposta")
+                else:
+                    _log(f"  ✗ Falha HTTP {r.status_code}")
+            except requests.RequestException as e:
+                _log(f"  ✗ Erro de conexao: {e}")
 
         # 2. Fallback: login via formulario web (Seam/JSF)
         form_paths = [
@@ -119,16 +144,23 @@ class PjeClient:
         for path in form_paths:
             url = f"{self.base_url}{path}"
             try:
-                # Busca o formulario para obter viewstate/tokens CSRF
+                _log(f"[FORM] GET {url}")
                 get_r = self.session.get(url, timeout=TIMEOUT)
+                _log(f"  → HTTP {get_r.status_code} | URL final: {get_r.url}")
                 if not get_r.ok:
+                    _log(f"  ✗ Nao foi possivel carregar o formulario")
                     continue
 
-                # Extrai campos ocultos do formulario
                 import re
                 html = get_r.text
                 viewstate = re.search(r'name="javax\.faces\.ViewState"[^>]*value="([^"]+)"', html)
-                form_id  = re.search(r'<form[^>]*id="([^"]*login[^"]*)"', html, re.I)
+                form_id   = re.search(r'<form[^>]*id="([^"]*login[^"]*)"', html, re.I)
+                mfa_hint  = re.search(r'(token|otp|segundo.fator|autenticacao.dupla|two.factor|captcha|recaptcha)', html, re.I)
+
+                _log(f"  ViewState encontrado: {'sim' if viewstate else 'nao'}")
+                _log(f"  Form ID: {form_id.group(1) if form_id else 'nao encontrado'}")
+                if mfa_hint:
+                    _log(f"  ⚠ POSSIVEL MFA/2FA detectado na pagina: '{mfa_hint.group(1)}'")
 
                 payload_form = {
                     "javax.faces.ViewState": viewstate.group(1) if viewstate else "",
@@ -141,34 +173,48 @@ class PjeClient:
                     fid = form_id.group(1)
                     payload_form[f"{fid}:username"] = usuario
                     payload_form[f"{fid}:password"] = senha
-                    payload_form[f"{fid}:entrar"] = "Entrar"
+                    payload_form[f"{fid}:entrar"]   = "Entrar"
 
+                _log(f"[FORM] POST {url} com {len(payload_form)} campos")
                 post_r = self.session.post(
                     url, data=payload_form,
                     headers={**self.session.headers, "Content-Type": "application/x-www-form-urlencoded"},
                     timeout=TIMEOUT, allow_redirects=True,
                 )
+                _log(f"  → HTTP {post_r.status_code} | URL final: {post_r.url}")
 
-                # Considera autenticado se:
-                # - Redireciona para pagina diferente do login
-                # - Ou retorna 200 sem "Senha incorreta"/"Login invalido"
-                final_url = post_r.url
                 body = post_r.text.lower()
-                login_failed = any(x in body for x in [
-                    "senha incorreta", "login inv", "usuario inv",
-                    "credencial inv", "acesso negado", "incorrect", "invalid"
-                ])
-                if not login_failed and ("login" not in final_url.lower() or post_r.status_code == 200):
-                    # Verifica se sessao e valida tentando acessar area restrita
-                    test = self.session.get(
-                        f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
-                        timeout=TIMEOUT, allow_redirects=False
-                    )
-                    if test.status_code in (200, 302) and "login" not in test.headers.get("Location", "").lower():
-                        return True
-            except requests.RequestException:
-                continue
+                erros_detectados = [x for x in [
+                    "senha incorreta", "login inv", "usuario inv", "credencial inv",
+                    "acesso negado", "incorrect", "invalid", "autenticacao falhou",
+                    "usuario ou senha", "nao autorizado"
+                ] if x in body]
 
+                mfa_pos = re.search(r'(token|otp|segundo.fator|two.factor|codigo de verificacao)', body, re.I)
+                if mfa_pos:
+                    _log(f"  ⚠ PAGINA POS-LOGIN EXIGE 2o FATOR: '{mfa_pos.group(1)}'")
+                    _log(f"  Trecho da pagina: {post_r.text[max(0,post_r.text.lower().find(mfa_pos.group(1))-100):post_r.text.lower().find(mfa_pos.group(1))+200]}")
+
+                if erros_detectados:
+                    _log(f"  ✗ Mensagem de erro detectada: {erros_detectados}")
+                    _log(f"  Trecho HTML: {post_r.text[:500]}")
+                    continue
+
+                test = self.session.get(
+                    f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
+                    timeout=TIMEOUT, allow_redirects=False
+                )
+                _log(f"  Teste sessao: HTTP {test.status_code} | Location: {test.headers.get('Location','')[:80]}")
+                if test.status_code in (200, 302) and "login" not in test.headers.get("Location", "").lower():
+                    _log("  ✓ Sessao autenticada com sucesso via formulario")
+                    return True
+                else:
+                    _log("  ✗ Sessao nao autenticada — redirecionado para login")
+
+            except requests.RequestException as e:
+                _log(f"  ✗ Erro de conexao: {e}")
+
+        _log("✗ Todas as tentativas de autenticacao falharam")
         return False
 
     def _extrair_token(self, response: requests.Response) -> str | None:
