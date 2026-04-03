@@ -88,14 +88,17 @@ class PjeClient:
         return False
 
     def autenticar_com_senha(self, usuario: str, senha: str) -> bool:
-        """Autentica via usuario e senha, retorna JWT."""
-        payload = {"username": usuario, "password": senha, "token": ""}
+        """
+        Autentica via usuario e senha.
+        Tenta REST JSON primeiro, depois form POST (Seam/JSF).
+        """
+        # 1. Tenta endpoints REST JSON
+        payload_json = {"username": usuario, "password": senha, "token": ""}
         for path in AUTH_SENHA_PATHS:
             url = f"{self.base_url}{path}"
             try:
                 r = self.session.post(
-                    url,
-                    json=payload,
+                    url, json=payload_json,
                     headers={**self.session.headers, "Content-Type": "application/json"},
                     timeout=TIMEOUT,
                 )
@@ -106,6 +109,66 @@ class PjeClient:
                         return True
             except requests.RequestException:
                 continue
+
+        # 2. Fallback: login via formulario web (Seam/JSF)
+        form_paths = [
+            "/pje/login.seam",
+            "/pje/loginForm.seam",
+            "/login.seam",
+        ]
+        for path in form_paths:
+            url = f"{self.base_url}{path}"
+            try:
+                # Busca o formulario para obter viewstate/tokens CSRF
+                get_r = self.session.get(url, timeout=TIMEOUT)
+                if not get_r.ok:
+                    continue
+
+                # Extrai campos ocultos do formulario
+                import re
+                html = get_r.text
+                viewstate = re.search(r'name="javax\.faces\.ViewState"[^>]*value="([^"]+)"', html)
+                form_id  = re.search(r'<form[^>]*id="([^"]*login[^"]*)"', html, re.I)
+
+                payload_form = {
+                    "javax.faces.ViewState": viewstate.group(1) if viewstate else "",
+                    "username": usuario,
+                    "password": senha,
+                    "j_username": usuario,
+                    "j_password": senha,
+                }
+                if form_id:
+                    fid = form_id.group(1)
+                    payload_form[f"{fid}:username"] = usuario
+                    payload_form[f"{fid}:password"] = senha
+                    payload_form[f"{fid}:entrar"] = "Entrar"
+
+                post_r = self.session.post(
+                    url, data=payload_form,
+                    headers={**self.session.headers, "Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=TIMEOUT, allow_redirects=True,
+                )
+
+                # Considera autenticado se:
+                # - Redireciona para pagina diferente do login
+                # - Ou retorna 200 sem "Senha incorreta"/"Login invalido"
+                final_url = post_r.url
+                body = post_r.text.lower()
+                login_failed = any(x in body for x in [
+                    "senha incorreta", "login inv", "usuario inv",
+                    "credencial inv", "acesso negado", "incorrect", "invalid"
+                ])
+                if not login_failed and ("login" not in final_url.lower() or post_r.status_code == 200):
+                    # Verifica se sessao e valida tentando acessar area restrita
+                    test = self.session.get(
+                        f"{self.base_url}/pje/ConsultaProcessual/listView.seam",
+                        timeout=TIMEOUT, allow_redirects=False
+                    )
+                    if test.status_code in (200, 302) and "login" not in test.headers.get("Location", "").lower():
+                        return True
+            except requests.RequestException:
+                continue
+
         return False
 
     def _extrair_token(self, response: requests.Response) -> str | None:
