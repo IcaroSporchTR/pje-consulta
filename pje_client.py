@@ -46,6 +46,10 @@ PROCESS_PATHS = [
     "/pje/seam/resource/rest/consultaPublica/processo/{numero}",
 ]
 DOCS_PATHS = [
+    # API pje-legacy (documentacao oficial docs.pje.jus.br)
+    "/seam/resource/rest/pje-legacy/api/v1/processos/{id}/documentos",
+    "/pje/seam/resource/rest/pje-legacy/api/v1/processos/{id}/documentos",
+    # Paths legados (fallback)
     "/pje/seam/resource/rest/processo/{id}/documentos",
     "/seam/resource/rest/processo/{id}/documentos",
 ]
@@ -822,21 +826,42 @@ class PjeClient:
         return docs
 
     def listar_documentos(self, processo_id: str, processo_url: str = "") -> list:
+        app_header = getattr(self, "_pje_legacy_app", "")
+        extra = {"X-pje-legacy-app": app_header} if app_header else {}
+
         for template in DOCS_PATHS:
-            result = self._get(template.format(id=processo_id))
-            if result:
-                docs = result if isinstance(result, list) else result.get("documentos", [])
+            url = f"{self.base_url}{template.format(id=processo_id)}"
+            try:
+                r = self.session.get(
+                    url,
+                    headers={**self.session.headers, **extra},
+                    timeout=TIMEOUT,
+                )
+                _last_auth_log.append(f"  [docs] GET {template.format(id=processo_id)[:70]} → {r.status_code}")
+                if r.status_code != 200:
+                    continue
+                raw = r.json()
+                # Suporta envelope {"status":"ok","result":[...]} e lista direta
+                docs_raw = raw.get("result", raw) if isinstance(raw, dict) else raw
+                if isinstance(docs_raw, dict):
+                    docs_raw = docs_raw.get("documentos", [])
+                if not docs_raw:
+                    continue
+                _last_auth_log.append(f"  ✓ {len(docs_raw)} documento(s) via REST")
                 return [
                     {
                         "id":      d.get("id") or d.get("idDocumento"),
-                        "tipo":    d.get("tipoDocumento", {}).get("descricao", "") if isinstance(d.get("tipoDocumento"), dict) else d.get("tipoDocumento", ""),
-                        "nome":    d.get("nomeArquivo") or d.get("descricao", ""),
-                        "data":    d.get("dataHora") or d.get("data", ""),
+                        "tipo":    (d.get("tipoDocumento") or {}).get("descricao", "") if isinstance(d.get("tipoDocumento"), dict) else d.get("tipoDocumento", ""),
+                        "nome":    d.get("nomeArquivo") or d.get("descricao") or d.get("nome", ""),
+                        "data":    d.get("dataHora") or d.get("data-de-juntada") or d.get("data", ""),
                         "autor":   d.get("nomeAutor") or d.get("autor", ""),
                         "url_pdf": self._url_pdf(d),
                     }
-                    for d in docs
+                    for d in docs_raw
                 ]
+            except Exception as e:
+                _last_auth_log.append(f"  ✗ docs REST: {e}")
+
         # Fallback: scraping da interface web
         _last_auth_log.append("  → REST documentos indisponivel; tentando interface web...")
         return self.listar_documentos_web(processo_id, processo_url)
@@ -845,14 +870,30 @@ class PjeClient:
         doc_id = doc.get("id") or doc.get("idDocumento", "")
         if not doc_id:
             return ""
+        # URL para visualizacao no browser (pagina autenticada do PJe)
         return f"{self.base_url}/pje/Processo/ConsultaDocumento/listView.seam?idDocumento={doc_id}"
 
     def baixar_documento(self, doc_id: str) -> bytes | None:
-        url = self._url_pdf({"id": doc_id})
-        try:
-            r = self.session.get(url, timeout=60)
-            if r.ok and "pdf" in r.headers.get("Content-Type", ""):
-                return r.content
-        except Exception:
-            pass
+        """Tenta baixar o PDF do documento via endpoints documentados."""
+        app_header = getattr(self, "_pje_legacy_app", "")
+        extra = {"X-pje-legacy-app": app_header} if app_header else {}
+        candidatos = [
+            # API pje-legacy (docs oficiais)
+            f"{self.base_url}/seam/resource/rest/pje-legacy/api/v1/documentos/{doc_id}:download",
+            f"{self.base_url}/pje/seam/resource/rest/pje-legacy/api/v1/documentos/{doc_id}:download",
+            # URL de visualizacao web (fallback)
+            f"{self.base_url}/pje/Processo/ConsultaDocumento/listView.seam?idDocumento={doc_id}",
+        ]
+        for url in candidatos:
+            try:
+                r = self.session.get(
+                    url,
+                    headers={**self.session.headers, **extra},
+                    timeout=60,
+                )
+                ct = r.headers.get("Content-Type", "")
+                if r.ok and "pdf" in ct:
+                    return r.content
+            except Exception:
+                continue
         return None
